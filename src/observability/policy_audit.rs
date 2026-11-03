@@ -460,6 +460,10 @@ pub struct PolicyDecisionEvent<'a> {
     pub policy_version: Option<u32>,
     /// `sha256:<hex>` content hash of the exact Rego enforced (attestation).
     pub policy_content_hash: Option<&'a str>,
+    /// The MCP tool a `tools/call` names, when the decision is about one.
+    pub mcp_tool_name: Option<&'a str>,
+    /// DID of the Transit Point's agent, when resolved before the decision.
+    pub target_did: Option<&'a str>,
 }
 
 /// Emit one structured event describing a policy decision.
@@ -577,6 +581,12 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
         .unwrap_or_default();
     let policy_name = decision_policy_name(&event);
     let surface_variant = current_request_variant();
+    let mcp_tool_name = event
+        .mcp_tool_name
+        .unwrap_or_default();
+    let target_did = event
+        .target_did
+        .unwrap_or_default();
 
     if allowed {
         tracing::debug!(
@@ -599,6 +609,8 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             trace_id = trace_id,
             policy_version = policy_version_str.as_str(),
             policy_content_hash = policy_content_hash,
+            mcp_tool_name = mcp_tool_name,
+            target_did = target_did,
             "policy decision: allow"
         );
     } else {
@@ -622,6 +634,8 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             trace_id = trace_id,
             policy_version = policy_version_str.as_str(),
             policy_content_hash = policy_content_hash,
+            mcp_tool_name = mcp_tool_name,
+            target_did = target_did,
             "policy decision: {decision}"
         );
     }
@@ -669,6 +683,12 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             event.policy_content_hash,
             decision_caller(&event),
             event.removed_tools,
+            event
+                .mcp_tool_name
+                .filter(|name| !name.is_empty()),
+            event
+                .target_did
+                .filter(|did| !did.is_empty()),
         );
     }
 
@@ -1186,6 +1206,8 @@ mod tests {
                     caller: None,
                     error: None,
                     removed_tools: None,
+                    mcp_tool_name: Some("delete_repo"),
+                    target_did: Some("did:web:partner.example.com"),
                 })
             });
         });
@@ -1213,6 +1235,75 @@ mod tests {
         assert_eq!(field(ev, "gateway_did"), Some("did:web:gw1"));
         assert_eq!(field(ev, "policy_version"), Some("3"));
         assert_eq!(field(ev, "policy_content_hash"), Some("sha256:abc123"));
+        assert_eq!(field(ev, "mcp_tool_name"), Some("delete_repo"));
+        assert_eq!(field(ev, "target_did"), Some("did:web:partner.example.com"));
+    }
+
+    #[tokio::test]
+    async fn the_audit_record_carries_the_tool_and_the_target_agent() {
+        let ((), events) = crate::audit::producer::capture(async {
+            record_policy_decision(PolicyDecisionEvent {
+                scope: PolicyScope::McpTool,
+                allow: false,
+                policy_id: Some("mcp_tool_gating"),
+                flow: PolicyFlow::TransitPoint,
+                mcp_tool_name: Some("delete_repo"),
+                target_did: Some("did:web:partner.example.com"),
+                ..Default::default()
+            });
+        })
+        .await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]
+                .mcp_tool_name
+                .as_deref(),
+            Some("delete_repo")
+        );
+        match &events[0].event {
+            crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision { target_did, flow, .. } => {
+                assert_eq!(target_did.as_deref(), Some("did:web:partner.example.com"));
+                assert_eq!(flow, "transit_point");
+            }
+            other => panic!("expected a policy decision, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_audit_record_omits_an_unknown_or_blank_tool_and_target_agent() {
+        let ((), events) = crate::audit::producer::capture(async {
+            record_policy_decision(PolicyDecisionEvent {
+                scope: PolicyScope::McpTool,
+                allow: true,
+                ..Default::default()
+            });
+            record_policy_decision(PolicyDecisionEvent {
+                scope: PolicyScope::McpTool,
+                allow: true,
+                mcp_tool_name: Some(""),
+                target_did: Some(""),
+                ..Default::default()
+            });
+        })
+        .await;
+
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            assert_eq!(event.mcp_tool_name, None);
+            let row = serde_json::to_value(event).unwrap();
+            assert!(
+                row.get("mcp_tool_name")
+                    .is_none(),
+                "{row}"
+            );
+            assert!(
+                row["event"]["policy_decision"]
+                    .get("target_did")
+                    .is_none(),
+                "{row}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1415,6 +1506,7 @@ mod tests {
             policy_version: None,
             policy_content_hash: None,
             removed_tools: None,
+            target_did: None,
         };
         let stored = serde_json::to_value(event).unwrap();
         assert!(

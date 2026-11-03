@@ -7603,6 +7603,7 @@ async fn evaluate_mcp_tool_policies_for_fabric(
 
     let error_event = || crate::observability::PolicyDecisionEvent {
         scope: crate::observability::PolicyScope::McpTool,
+        mcp_tool_name: requested_tool_name,
         flow: crate::observability::PolicyFlow::Fabric,
         surface_id: Some(config_id),
         surface_name: Some(surface.name.as_str()),
@@ -7668,6 +7669,7 @@ async fn evaluate_mcp_tool_policies_for_fabric(
     if entries.is_empty() {
         crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
             scope: crate::observability::PolicyScope::McpTool,
+            mcp_tool_name: requested_tool_name,
             flow: crate::observability::PolicyFlow::Fabric,
             allow: false,
             reason: Some("Access denied: insufficient permissions for this tool"),
@@ -7741,6 +7743,7 @@ async fn evaluate_mcp_tool_policies_for_fabric(
         };
         crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
             scope: crate::observability::PolicyScope::McpTool,
+            mcp_tool_name: requested_tool_name,
             flow: crate::observability::PolicyFlow::Fabric,
             allow,
             reason,
@@ -7909,6 +7912,7 @@ async fn evaluate_mcp_tool_gating_call_for_fabric(
     let allowed = gating.is_tool_call_allowed(&tool_name, &input_value);
     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
         scope: crate::observability::PolicyScope::McpTool,
+        mcp_tool_name: Some(tool_name.as_str()),
         flow: crate::observability::PolicyFlow::Fabric,
         allow: allowed,
         reason: if allowed {

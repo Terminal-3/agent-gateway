@@ -155,6 +155,8 @@ pub fn synthesize_metadata_gate_failures<'o>(
                     element_name: elem.name.as_deref(),
                     authority_id: None,
                     entity_id: None,
+                    action: Some(&result.action),
+                    resource: Some(&result.resource),
                     trust_registry_id: elem
                         .trust_registry_id
                         .as_str(),
@@ -595,5 +597,47 @@ mod tests {
                 .all(Option::is_none)
         );
         assert_eq!(runnable.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_gated_element_records_its_query_without_ids() {
+        let input = wrap(json!({}));
+        let mut authorization = elem("{{ input.agent.provider_did }}");
+        authorization.query_type = TrqpQueryType::Authorization;
+        authorization.query.action = Some("invoke".to_string());
+        authorization.query.resource = Some("tool:x".to_string());
+        let recognition = elem("{{ input.agent.provider_did }}");
+        let runnable = elem("did:literal:entity");
+        let ((_, ran), events) = crate::audit::producer::capture(async {
+            synthesize_metadata_gate_failures(
+                "surf",
+                TrustCheckLeg::Caller,
+                &[authorization, recognition, runnable],
+                &input,
+            )
+        })
+        .await;
+
+        assert_eq!(ran.len(), 1);
+        let recorded: Vec<_> = events
+            .iter()
+            .map(|event| match &event.event {
+                crate::delegation_vault::audit::DelegationAuditAction::TrustCheck {
+                    authority_id,
+                    entity_id,
+                    action,
+                    resource,
+                    ..
+                } => (authority_id.clone(), entity_id.clone(), action.clone(), resource.clone()),
+                other => panic!("expected a trust check, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            vec![
+                (None, None, Some("invoke".to_string()), Some("tool:x".to_string())),
+                (None, None, Some("is".to_string()), Some("ownedAgent".to_string())),
+            ]
+        );
     }
 }

@@ -58,6 +58,21 @@ describe('eventNarrative', () => {
     );
     expect(ok.tone).toBe('allow');
     expect(ok.title).toBe('Trust check passed');
+    expect(ok.summary).toBe('The caller leg verified ent against auth.');
+
+    const long = describeEntry(
+      at({
+        trust_check: {
+          leg: 'caller',
+          authority_id: 'did:key:aaaaaaaabbbbbbbbccccccccdddddddd',
+          entity_id: 'did:key:eeeeeeeeffffffffgggggggghhhhhhhh',
+          ok: true,
+        },
+      })
+    );
+    expect(long.summary).toBe(
+      'The caller leg verified did:key:eeeeeeee...hhhhhhhh against did:key:aaaaaaaa...dddddddd.'
+    );
 
     const bad = describeEntry(
       at({

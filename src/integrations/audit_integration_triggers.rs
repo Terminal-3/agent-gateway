@@ -213,6 +213,7 @@ mod tests {
                 policy_version: Some(3),
                 policy_content_hash: Some("sha256:abc".to_string()),
                 removed_tools: None,
+                target_did: None,
             },
             None,
             None,
@@ -523,6 +524,8 @@ mod tests {
                 ok: true,
                 error_code: None,
                 transit_point: None,
+                action: None,
+                resource: None,
             },
             DelegationAuditAction::TraceTerminated {
                 own_trace_id: "own".to_string(),

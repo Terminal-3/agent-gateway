@@ -3334,6 +3334,13 @@ fn outbound_actor_did(ctx: &OutboundPipelineContext) -> Option<&str> {
     }
 }
 
+/// DID of the Transit Point's agent, once an earlier step resolved its agent context.
+fn outbound_target_did(ctx: &OutboundPipelineContext) -> Option<&str> {
+    ctx.target_agent_context
+        .as_ref()
+        .and_then(|agent| agent.did.as_deref())
+}
+
 /// The caller of a Transit Point call, for attributing outbound decisions: the
 /// inbound caller a transit token carries, else the caller the Transit Point
 /// verified itself, by its resource token or `source_auth`.
@@ -3367,6 +3374,7 @@ struct OutboundPolicyAudit<'a> {
     policy_version: Option<u32>,
     policy_content_hash: Option<&'a str>,
     caller: Option<&'a crate::delegation_vault::audit::AuditCallerContext>,
+    target_did: Option<&'a str>,
 }
 
 impl OutboundPolicyAudit<'_> {
@@ -3412,6 +3420,7 @@ impl OutboundPolicyAudit<'_> {
             policy_version: self.policy_version,
             policy_content_hash: self.policy_content_hash,
             caller: self.caller,
+            target_did: self.target_did,
             ..Default::default()
         });
     }
@@ -3478,6 +3487,7 @@ async fn step_gateway_opa_policy(
         policy_version,
         policy_content_hash: policy_hash.as_deref(),
         caller: caller.as_ref(),
+        target_did: outbound_target_did(ctx),
     };
     match gw_pm.evaluate_policy_decision(&gateway_id, input_value) {
         Ok(decision) if decision.allow => {
@@ -3523,6 +3533,7 @@ fn record_surface_policy_unavailable(
         policy_version: None,
         policy_content_hash: None,
         caller: caller.as_ref(),
+        target_did: outbound_target_did(ctx),
     }
     .record_error(error);
     OutboundPipelineError::SurfacePolicyError(error)
@@ -3605,6 +3616,7 @@ async fn step_surface_opa_policy(
         policy_version,
         policy_content_hash: policy_hash.as_deref(),
         caller: caller.as_ref(),
+        target_did: outbound_target_did(ctx),
     };
     match pm.evaluate_policy_decision(&outbound_key, input_value) {
         Ok(decision) if decision.allow => {
@@ -3745,6 +3757,7 @@ async fn step_transit_point_opa_policy(
         policy_version,
         policy_content_hash: policy_hash.as_deref(),
         caller: caller.as_ref(),
+        target_did: outbound_target_did(ctx),
     };
     match pm.evaluate_policy_decision(&tp_key, input_value) {
         Ok(decision) if decision.allow => {
@@ -3868,6 +3881,8 @@ async fn step_transit_mcp_tool_gating(
             http_method: Some(ctx.original_method.as_str()),
             path: Some(ctx.request_path.as_str()),
             caller: outbound_caller(ctx).as_ref(),
+            flow: crate::observability::PolicyFlow::TransitPoint,
+            target_did: outbound_target_did(ctx),
             ..Default::default()
         });
         warn!(
@@ -3918,6 +3933,9 @@ async fn step_transit_mcp_tool_gating(
         http_method: Some(ctx.original_method.as_str()),
         path: Some(ctx.request_path.as_str()),
         caller: outbound_caller(ctx).as_ref(),
+        flow: crate::observability::PolicyFlow::TransitPoint,
+        mcp_tool_name: Some(tool_name.as_str()),
+        target_did: outbound_target_did(ctx),
         ..Default::default()
     });
 
@@ -4071,6 +4089,7 @@ fn step_transit_point_response_policy(
             .content_hash
             .as_deref(),
         caller: caller.as_ref(),
+        target_did: outbound_target_did(ctx),
     };
     if !decision.allow {
         match decision.error {
@@ -6789,6 +6808,7 @@ mod tests {
                     policy_version: None,
                     policy_content_hash: None,
                     caller: None,
+                    target_did: None,
                 }
                 .record(true, None);
 
@@ -6808,6 +6828,7 @@ mod tests {
                     policy_version: Some(5),
                     policy_content_hash: Some("sha256:egress"),
                     caller: carried.as_ref(),
+                    target_did: None,
                 }
                 .record(false, Some("blocked by policy"));
             })
@@ -6853,6 +6874,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outbound_policy_audit_records_the_target_agent() {
+        let audit = |target_did| OutboundPolicyAudit {
+            scope: crate::observability::PolicyScope::Surface,
+            policy_id: crate::policies::SURFACE_POLICY_PACKAGE,
+            policy_definition_id: None,
+            policy_name: None,
+            surface_id: Some("surf-1"),
+            surface_name: None,
+            http_method: "POST",
+            path: "/a2a",
+            actor_did: None,
+            gateway_did: None,
+            trace_id: "req-1",
+            policy_version: None,
+            policy_content_hash: None,
+            caller: None,
+            target_did,
+        };
+        let ((), events) = crate::audit::producer::capture(async {
+            audit(Some("did:web:partner.example.com")).record(false, Some("blocked"));
+            audit(None).record_error(crate::observability::PolicyEvaluationError::EvaluationError);
+        })
+        .await;
+
+        let recorded: Vec<_> = events
+            .iter()
+            .map(|event| match &event.event {
+                crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision { target_did, flow, .. } => {
+                    assert_eq!(flow, "transit_point");
+                    target_did.clone()
+                }
+                other => panic!("expected a policy decision, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(recorded, vec![Some("did:web:partner.example.com".to_string()), None]);
+    }
+
+    #[tokio::test]
     async fn outbound_policy_audit_falls_back_to_the_definition_id_when_unnamed() {
         use crate::observability::policy_audit::POLICY_DECISION_COLLECTOR;
         use std::sync::Mutex;
@@ -6875,6 +6934,7 @@ mod tests {
                     policy_version: None,
                     policy_content_hash: None,
                     caller: None,
+                    target_did: None,
                 }
                 .record(true, None);
             })
@@ -6914,6 +6974,7 @@ mod tests {
                     policy_version: None,
                     policy_content_hash: None,
                     caller: None,
+                    target_did: None,
                 }
                 .record_error(crate::observability::PolicyEvaluationError::EvaluationError);
             })
@@ -8655,6 +8716,116 @@ mod tests {
 
             assert_eq!(matches!(result, Err(OutboundPipelineError::TransitMcpToolGated)), denied, "{body}: {result:?}");
             assert!(denied || result.is_ok(), "{body}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn transit_tool_gating_records_the_tool_and_the_target_agent() {
+        let manager = Arc::new(crate::policies::SurfacePolicyManager::new());
+        let surface: crate::config::agent_surface::AgentSurface = serde_json::from_value(json!({
+            "surface_id": "cfg-tp-gate-audit",
+            "name": "tp-gate-audit",
+            "description": "",
+            "status": "active",
+            "access_point": {
+                "listen_address": "0.0.0.0:8443",
+                "route": "/surfaces/order",
+                "protocol": "mcp"
+            },
+            "target": { "endpoint": "http://localhost:9000" },
+            "transit": {
+                "points": [{
+                    "alias": "partner-mcp",
+                    "target_endpoint": "https://partner.example.com/mcp",
+                    "protocol": "mcp",
+                    "mcp_tool_gating": {
+                        "gates": [{
+                            "id": "g1",
+                            "name": "no admin",
+                            "action": { "effect": "deny", "patterns": ["^admin_"] }
+                        }]
+                    }
+                }]
+            }
+        }))
+        .expect("surface json");
+        manager
+            .update_channel_policy(&surface)
+            .await
+            .unwrap();
+        let mut state = test_outbound_state();
+        state.policy_manager = Some(manager);
+        let surface = Arc::new(surface);
+
+        let target = crate::surface_context::AgentContext {
+            did_verified: false,
+            did_verification: None,
+            did: Some("did:web:partner.example.com".to_string()),
+            provider_did: None,
+            authority_did: None,
+            identity_issuer_did: None,
+            trust_registry_did: None,
+            agent_dna: None,
+            trust_verification: None,
+            source_trust_verification: None,
+            target_trust_verification: None,
+            tr_identity_mismatch: false,
+        };
+        for (body, target_agent, tool, target_did) in [
+            (
+                json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "admin_reset"}}),
+                Some(target.clone()),
+                Some("admin_reset"),
+                Some("did:web:partner.example.com"),
+            ),
+            (
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "read_orders"}}),
+                None,
+                Some("read_orders"),
+                None,
+            ),
+            (
+                json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {}}),
+                Some(target.clone()),
+                None,
+                Some("did:web:partner.example.com"),
+            ),
+        ] {
+            let mut ctx = test_pipeline_context();
+            ctx.surface = surface.clone();
+            ctx.virtual_channel = serde_json::from_value(json!({
+                "alias": "partner-mcp",
+                "target_endpoint": "https://partner.example.com/mcp",
+                "protocol": "mcp"
+            }))
+            .expect("transit point json");
+            ctx.operation = Some("tools/call".to_string());
+            ctx.body_bytes = Some(Bytes::from(serde_json::to_vec(&body).unwrap()));
+            ctx.target_agent_context = target_agent;
+
+            let (_, events) = crate::audit::producer::capture(step_transit_mcp_tool_gating(&state, &mut ctx)).await;
+
+            assert_eq!(events.len(), 1, "{body}: {events:?}");
+            assert_eq!(
+                events[0]
+                    .mcp_tool_name
+                    .as_deref(),
+                tool,
+                "{body}"
+            );
+            match &events[0].event {
+                crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision {
+                    scope,
+                    flow,
+                    target_did: recorded,
+                    ..
+                } => {
+                    assert_eq!(scope, "mcp_tool", "{body}");
+                    assert_eq!(flow, "transit_point", "{body}");
+                    assert_eq!(recorded.as_deref(), target_did, "{body}");
+                }
+                other => panic!("expected a policy decision, got {other:?}"),
+            }
         }
     }
 

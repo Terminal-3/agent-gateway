@@ -233,6 +233,8 @@ async fn execute_one<C: TrqpClient + ?Sized>(
                 element_name: elem.name.as_deref(),
                 authority_id: Some(&elem.query.authority_id),
                 entity_id: Some(&elem.query.entity_id),
+                action: Some(&result.action),
+                resource: Some(&result.resource),
                 trust_registry_id: &elem.trust_registry_id,
                 query_type: elem.query_type,
                 ok: false,
@@ -316,6 +318,8 @@ async fn execute_one<C: TrqpClient + ?Sized>(
         element_name: elem.name.as_deref(),
         authority_id: Some(&resolved.authority_id),
         entity_id: Some(&resolved.entity_id),
+        action: Some(&result.action),
+        resource: Some(&result.resource),
         trust_registry_id: &elem.trust_registry_id,
         query_type: elem.query_type,
         ok: result.ok,
@@ -421,6 +425,7 @@ pub fn synthesize_unavailable_target<'o>(
     elements
         .iter()
         .map(|elem| {
+            let result = synthesize_failure(elem, code, detail.to_string());
             record_trust_check(TrustCheckAuditEvent {
                 surface_id: origin.surface_id,
                 transit_point: origin.transit_point,
@@ -429,6 +434,8 @@ pub fn synthesize_unavailable_target<'o>(
                 element_name: elem.name.as_deref(),
                 authority_id: None,
                 entity_id: None,
+                action: Some(&result.action),
+                resource: Some(&result.resource),
                 trust_registry_id: &elem.trust_registry_id,
                 query_type: elem.query_type,
                 ok: false,
@@ -436,7 +443,7 @@ pub fn synthesize_unavailable_target<'o>(
                 error_detail: Some(detail),
                 latency_ms: 0,
             });
-            synthesize_failure(elem, code, detail.to_string())
+            result
         })
         .collect()
 }
@@ -1007,6 +1014,103 @@ mod tests {
         assert_eq!(transit_point(&routed), Some("partner-a".to_string()));
         assert_eq!(unrouted.len(), 1);
         assert_eq!(transit_point(&unrouted), None);
+    }
+
+    fn audited_query(
+        event: &crate::delegation_vault::audit::DelegationAuditEvent
+    ) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+        match &event.event {
+            crate::delegation_vault::audit::DelegationAuditAction::TrustCheck {
+                authority_id,
+                entity_id,
+                action,
+                resource,
+                ..
+            } => (authority_id.clone(), entity_id.clone(), action.clone(), resource.clone()),
+            other => panic!("expected a trust check, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_executed_check_records_the_resolved_query_in_full() {
+        let elements = vec![elem_with_action_resource("e1", "tr-a"), elem("e2", "tr-b", Some(5))];
+        let client = MockClient::new(vec![
+            Programmed::Outcome(TrqpOutcome::Allowed),
+            Programmed::Error(TrqpClientError::Unreachable("down".to_string())),
+        ]);
+        let input = ctx();
+        let (_, events) = crate::audit::producer::capture(execute_list(
+            "surf",
+            TrustCheckLeg::Caller,
+            &elements,
+            &ExecutionContext { input: &input },
+            &client,
+        ))
+        .await;
+
+        assert_eq!(events.len(), 2);
+        let mut recorded: Vec<_> = events
+            .iter()
+            .map(audited_query)
+            .collect();
+        recorded.sort();
+        let full = |action: &str, resource: &str| {
+            (
+                Some("did:web:caller-gateway".to_string()),
+                Some("did:web:caller".to_string()),
+                Some(action.to_string()),
+                Some(resource.to_string()),
+            )
+        };
+        assert_eq!(
+            recorded,
+            vec![
+                full("invoke", "tool:payments.transfer"),
+                full(RECOGNITION_DEFAULT_ACTION, RECOGNITION_DEFAULT_RESOURCE)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_template_failure_records_the_configured_query() {
+        let mut e = elem_with_action_resource("e1", "tr-a");
+        e.query.entity_id = "{{input.does.not.exist}}".to_string();
+        let client = MockClient::new(vec![]);
+        let input = ctx();
+        let (_, events) = crate::audit::producer::capture(execute_list(
+            "surf",
+            TrustCheckLeg::Caller,
+            &[e],
+            &ExecutionContext { input: &input },
+            &client,
+        ))
+        .await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            audited_query(&events[0]),
+            (
+                Some("{{input.caller.gateway.did}}".to_string()),
+                Some("{{input.does.not.exist}}".to_string()),
+                Some("invoke".to_string()),
+                Some("tool:payments.transfer".to_string()),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_target_records_the_query_without_ids() {
+        let elements = [elem_with_action_resource("e1", "tr-a")];
+        let (_, events) = crate::audit::producer::capture(async {
+            synthesize_unavailable_target("surface-9", &elements, AGENT_CARD_UNAVAILABLE, "card unavailable")
+        })
+        .await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            audited_query(&events[0]),
+            (None, None, Some("invoke".to_string()), Some("tool:payments.transfer".to_string()))
+        );
     }
 
     #[tokio::test]

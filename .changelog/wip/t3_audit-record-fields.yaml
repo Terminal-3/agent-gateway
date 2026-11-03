@@ -1,0 +1,42 @@
+branch: t3/audit-record-fields
+changes:
+  added:
+    - timestamp: '2026-11-03T12:00:00Z'
+      title: Name the MCP tool on MCP tool policy and gating decision records
+      description: >-
+        A policy_decision record for an MCP tool policy or MCP tool gating decision now carries
+        the called tool in its top-level mcp_tool_name, on the direct, MCP-proxy, Fabric and
+        Transit Point paths, so a Governance Audit integration can tell which tool a decision was
+        about. It is absent when the tools/call names no readable tool. The policy_audit log line
+        carries it too.
+    - timestamp: '2026-11-03T12:05:00Z'
+      title: Name the Transit Point's agent on Transit Point policy decision records
+      description: >-
+        A policy_decision record on the transit_point flow now carries target_did, the DID of the
+        Transit Point's agent, once the gateway has resolved that agent's context before deciding:
+        when the Transit Point has a trust_check_list and its agent card was fetched, or its policy
+        sets require_agent_context. It is absent otherwise, and on the access point and fabric
+        flows.
+    - timestamp: '2026-11-03T12:10:00Z'
+      title: Record the queried action and resource on trust check records
+      description: >-
+        A trust_check record now carries the TRQP action and resource the element queried, with
+        the recognition defaults applied, or the element's configured values when its templates
+        could not be resolved. The trust_check_audit log line carries them too.
+  changed:
+    - timestamp: '2026-11-03T12:15:00Z'
+      title: Keep full authority and entity ids on trust check records
+      description: >-
+        A trust_check record now keeps authority_id and entity_id in full instead of a shortened
+        did:METHOD:FIRST8...LAST8 form, so a record can be matched against the trust registry and
+        other records. The Audit page still shows them shortened.
+  fixed:
+    - timestamp: '2026-11-03T12:20:00Z'
+      title: Record Transit Point MCP tool gating decisions on the transit_point flow
+      description: >-
+        A tools/call decision made by a Transit Point's MCP tool gating was recorded on the
+        access_point flow. It is now recorded on the transit_point flow, like the Transit Point's
+        other policy decisions.
+  removed: []
+  security: []
+  breaking: []

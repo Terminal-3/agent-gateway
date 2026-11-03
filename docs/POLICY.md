@@ -249,7 +249,11 @@ addressable from policy while `name` is only a label. Counts are code points, no
 When an audit sink selects `trust_check`, each element's outcome is recorded with the
 surface id, the request's trace id and the authenticated caller (on the Access Point, Fabric
 and MCP-proxy paths), so a trust check can be tied to the request and principal that
-triggered it. On the outbound path the record also names the Transit Point.
+triggered it. On the outbound path the record also names the Transit Point. The record carries
+the queried `authority_id` and `entity_id` in full, and the `action` and `resource`, with the
+recognition defaults (`is`, `ownedAgent`) applied. On a template-resolution failure they are the
+element's configured templates; when the target's agent card or trust registry metadata is
+unavailable, `authority_id` and `entity_id` are omitted.
 
 ## Failed caller authentication
 
@@ -801,7 +805,7 @@ Every OPA evaluation emits a structured `tracing` event via
 `DEBUG`. Fields: `policy_scope`, `policy_flow`, `policy_decision`, `policy_id`,
 `policy_definition_id`, `deny_reason`, `surface_id`, `gateway_did`, `actor_did`,
 `caller_*`, `http_method`, `http_path`, `trace_id`, `policy_version`,
-`policy_content_hash`. See `src/observability/policy_audit.rs`.
+`policy_content_hash`, `mcp_tool_name`, `target_did`. See `src/observability/policy_audit.rs`.
 
 `policy_decision` is `allow`, `deny`, or `error`. `error` means the policy could not decide
 and the request was denied (fail closed); `deny_reason` is then `evaluation_error` (the Rego
@@ -833,6 +837,13 @@ Every decision record names its surface and its policy:
   label for the layer that decided: `Gateway policy`, `Surface policy`, `MCP tool gating`,
   `MCP tool policy`, `Response policy` or `MCP tool list filter`. A tool policy that matched no
   definition keeps the tool name.
+- `mcp_tool_name` (top level) names the tool a `tools/call` called, on MCP tool policy and MCP
+  tool gating decisions on every path and flow. It is absent when the request names no readable
+  tool, and on every other scope.
+- `target_did` (in the `policy_decision` body) is the DID of the Transit Point's agent, on
+  `transit_point` decisions made after the gateway resolved that agent's context: when the
+  Transit Point has a `trust_check_list` and its agent card was fetched, or its policy sets
+  `require_agent_context`. It is absent otherwise, and on the access point and fabric flows.
 - `request_id` identifies the gateway request the decision belongs to; one request yields a
   decision per policy layer, all with the same `request_id` (see
   [`OBSERVABILITY.md`](OBSERVABILITY.md)).

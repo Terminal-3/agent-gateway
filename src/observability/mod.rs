@@ -2,7 +2,6 @@
 
 pub mod caller_names;
 pub mod dashboard;
-pub mod did_display;
 pub mod http_trace;
 pub mod identity_binding_audit;
 pub mod identity_view;

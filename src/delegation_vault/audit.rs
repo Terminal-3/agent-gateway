@@ -445,6 +445,10 @@ pub enum DelegationAuditAction {
         /// sees (scope `mcp_tool_list`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         removed_tools: Option<Vec<String>>,
+        /// DID of the agent behind the Transit Point the request was routed
+        /// to, when the gateway resolved it before deciding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_did: Option<String>,
     },
     /// TRQP trust-check outcome. `authority_id` / `entity_id` are
     /// `Option<String>` and omitted from the JSONL on the target-leg
@@ -463,6 +467,12 @@ pub enum DelegationAuditAction {
         /// outside the outbound path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transit_point: Option<String>,
+        /// TRQP action queried, recognition defaults applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        /// TRQP resource queried, recognition defaults applied.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
     },
     /// Trace terminated at this surface's egress. Records the own → downstream
     /// trace mapping so an operator can bridge the terminated trace from this
@@ -1582,6 +1592,8 @@ pub fn audit_policy_decision(
     policy_content_hash: Option<&str>,
     caller: Option<AuditCallerContext>,
     removed_tools: Option<&[String]>,
+    mcp_tool_name: Option<&str>,
+    target_did: Option<&str>,
 ) {
     emit("policy_decision", || DelegationAuditEvent {
         event_id: new_event_id(),
@@ -1605,6 +1617,7 @@ pub fn audit_policy_decision(
             policy_version,
             policy_content_hash: policy_content_hash.map(str::to_string),
             removed_tools: removed_tools.map(<[String]>::to_vec),
+            target_did: target_did.map(str::to_string),
         },
         agent_did: None,
         agent_identity_did: None,
@@ -1620,7 +1633,7 @@ pub fn audit_policy_decision(
         inject_as: None,
         via_fabric: false,
         caller,
-        mcp_tool_name: None,
+        mcp_tool_name: mcp_tool_name.map(str::to_string),
         vp_jwt: None,
         vp_fingerprint: None,
         trace_id: trace_id.map(str::to_string),
@@ -1646,6 +1659,8 @@ pub fn audit_trust_check(
     entity_id: Option<&str>,
     ok: bool,
     error_code: Option<&str>,
+    action: Option<&str>,
+    resource: Option<&str>,
 ) {
     emit("trust_check", || DelegationAuditEvent {
         event_id: new_event_id(),
@@ -1657,6 +1672,8 @@ pub fn audit_trust_check(
             ok,
             error_code: error_code.map(str::to_string),
             transit_point: transit_point.map(str::to_string),
+            action: action.map(str::to_string),
+            resource: resource.map(str::to_string),
         },
         agent_did: None,
         agent_identity_did: None,
@@ -2087,6 +2104,7 @@ mod tests {
                 policy_version: None,
                 policy_content_hash: None,
                 removed_tools: None,
+                target_did: None,
             }
             .is_vp_audit()
         );
@@ -2098,6 +2116,8 @@ mod tests {
                 ok: false,
                 error_code: Some("QUERY_TIMEOUT".to_string()),
                 transit_point: None,
+                action: None,
+                resource: None,
             }
             .is_vp_audit()
         );
@@ -2318,6 +2338,7 @@ mod tests {
                 policy_version: None,
                 policy_content_hash: None,
                 removed_tools: None,
+                target_did: None,
             }),
         ];
 
@@ -2412,6 +2433,7 @@ mod tests {
                     policy_version: None,
                     policy_content_hash: None,
                     removed_tools: None,
+                    target_did: None,
                 },
                 agent_did: None,
                 agent_identity_did: None,
@@ -2478,6 +2500,8 @@ mod tests {
                     Some("sha256:abc"),
                     caller,
                     None,
+                    None,
+                    None,
                 )
             };
             decide(Some(build_caller_context(&identity)));
@@ -2501,6 +2525,81 @@ mod tests {
         assert_eq!(row["event"]["policy_decision"]["policy_name"], "Deny unknown callers");
         assert_eq!(row["event"]["policy_decision"]["policy_version"], 3);
         assert_eq!(row["event"]["policy_decision"]["policy_content_hash"], "sha256:abc");
+        assert!(
+            row.get("mcp_tool_name")
+                .is_none(),
+            "{row}"
+        );
+        assert!(
+            row["event"]["policy_decision"]
+                .get("target_did")
+                .is_none(),
+            "{row}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_policy_decision_records_the_tool_and_the_target_agent() {
+        let ((), events) = crate::audit::producer::capture(async {
+            audit_policy_decision(
+                "mcp_tool",
+                "deny",
+                "mcp_tool_gating",
+                None,
+                None,
+                Some("blocked by per-transit-point MCP tool gating"),
+                Some("surface-1"),
+                None,
+                None,
+                Some("POST"),
+                Some("/outbound/mcp/partner"),
+                Some("trace-1"),
+                "transit_point",
+                None,
+                None,
+                None,
+                None,
+                Some("admin_reset"),
+                Some("did:web:partner.example.com"),
+            );
+        })
+        .await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]
+                .mcp_tool_name
+                .as_deref(),
+            Some("admin_reset")
+        );
+        let row = serde_json::to_value(&events[0]).unwrap();
+        assert_eq!(row["mcp_tool_name"], "admin_reset");
+        assert_eq!(row["event"]["policy_decision"]["target_did"], "did:web:partner.example.com");
+        let again: DelegationAuditEvent = serde_json::from_value(row).expect("deserialize record");
+        match again.event {
+            DelegationAuditAction::PolicyDecision { target_did, .. } => {
+                assert_eq!(target_did.as_deref(), Some("did:web:partner.example.com"));
+            }
+            other => panic!("expected a policy decision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_policy_decision_row_without_a_target_did_still_reads() {
+        let row = serde_json::json!({"policy_decision": {
+            "scope": "surface",
+            "policy_id": "surface.policy",
+            "decision": "allow",
+            "deny_reason": null,
+            "surface_id": null,
+            "caller_did": null,
+            "http_method": null,
+            "http_path": null
+        }});
+        match serde_json::from_value::<DelegationAuditAction>(row).expect("deserialize action") {
+            DelegationAuditAction::PolicyDecision { target_did, .. } => assert_eq!(target_did, None),
+            other => panic!("expected a policy decision, got {other:?}"),
+        }
     }
 
     fn transit_claims(
@@ -2765,6 +2864,8 @@ mod tests {
                 Some("did:e"),
                 true,
                 None,
+                Some("invoke"),
+                Some("tool:search"),
             );
         })
         .await;
@@ -2776,6 +2877,17 @@ mod tests {
             Some("surface-1")
         );
         assert_eq!(events[0].trace_id.as_deref(), Some("trace-1"));
+        let wire = serde_json::to_value(&events[0]).expect("serialize record");
+        assert_eq!(wire["event"]["trust_check"]["action"], "invoke");
+        assert_eq!(wire["event"]["trust_check"]["resource"], "tool:search");
+        let again: DelegationAuditEvent = serde_json::from_value(wire).expect("deserialize record");
+        match again.event {
+            DelegationAuditAction::TrustCheck { action, resource, .. } => {
+                assert_eq!(action.as_deref(), Some("invoke"));
+                assert_eq!(resource.as_deref(), Some("tool:search"));
+            }
+            other => panic!("expected a trust check, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2790,6 +2902,8 @@ mod tests {
                 None,
                 false,
                 Some("AGENT_CARD_UNAVAILABLE"),
+                None,
+                None,
             );
         })
         .await;
@@ -2815,20 +2929,32 @@ mod tests {
             ok: true,
             error_code: None,
             transit_point: None,
+            action: None,
+            resource: None,
         };
         let wire = serde_json::to_value(&action).expect("serialize action");
         assert_eq!(wire["trust_check"]["leg"], serde_json::json!("caller"));
-        assert!(
-            wire["trust_check"]
-                .get("transit_point")
-                .is_none(),
-            "{wire}"
-        );
+        for field in ["transit_point", "action", "resource"] {
+            assert!(
+                wire["trust_check"]
+                    .get(field)
+                    .is_none(),
+                "{field}: {wire}"
+            );
+        }
 
         match serde_json::from_value::<DelegationAuditAction>(wire).expect("deserialize action") {
-            DelegationAuditAction::TrustCheck { transit_point, ok, .. } => {
+            DelegationAuditAction::TrustCheck {
+                transit_point,
+                ok,
+                action,
+                resource,
+                ..
+            } => {
                 assert_eq!(transit_point, None);
                 assert!(ok);
+                assert_eq!(action, None);
+                assert_eq!(resource, None);
             }
             other => panic!("expected a trust check, got {other:?}"),
         }

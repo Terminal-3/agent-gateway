@@ -3705,6 +3705,9 @@ async fn proxy_handler_with_mcp_runtime(
 
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         allow,
                         reason,
                         policy_id: outcome
@@ -3752,6 +3755,9 @@ async fn proxy_handler_with_mcp_runtime(
                     error!(channel = channel_name, error = %e, "Failed to evaluate MCP tool policy before fabric forwarding");
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         error: Some(crate::observability::PolicyEvaluationError::EvaluationError),
                         surface_id: Some(config_id),
                         surface_name: Some(state.surface.name.as_str()),
@@ -4532,6 +4538,9 @@ async fn proxy_handler_with_mcp_runtime(
                 Ok(outcome) if outcome.allow => {
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         allow: true,
                         surface_id: Some(config_id),
                         surface_name: Some(state.surface.name.as_str()),
@@ -4545,6 +4554,9 @@ async fn proxy_handler_with_mcp_runtime(
                 Ok(outcome) => {
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         allow: false,
                         reason: outcome.reason.as_deref(),
                         policy_id: outcome
@@ -4623,6 +4635,9 @@ async fn proxy_handler_with_mcp_runtime(
                     error!(channel = channel_name, error = %e, "Failed to evaluate MCP tool policy");
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         error: Some(crate::observability::PolicyEvaluationError::EvaluationError),
                         surface_id: Some(config_id),
                         surface_name: Some(state.surface.name.as_str()),
@@ -5957,6 +5972,7 @@ async fn proxy_handler_with_mcp_runtime(
 
         crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
             scope: crate::observability::PolicyScope::McpTool,
+            mcp_tool_name: Some(tool_name),
             allow: allowed,
             reason: if allowed {
                 None
@@ -11595,6 +11611,7 @@ async fn handle_fabric_request(
         let allowed = gating.is_tool_call_allowed(tool_name, &input_value);
         crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
             scope: crate::observability::PolicyScope::McpTool,
+            mcp_tool_name: Some(tool_name),
             allow: allowed,
             reason: if allowed {
                 None
@@ -15381,6 +15398,7 @@ async fn handle_mcp_proxy_request(
             Ok(outcome) if outcome.allow => {
                 crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                     scope: crate::observability::PolicyScope::McpTool,
+                    mcp_tool_name: mcp_context.and_then(crate::surface_context::McpContext::called_tool_name),
                     allow: true,
                     surface_id: Some(config_id),
                     surface_name: Some(state.surface.name.as_str()),
@@ -15394,6 +15412,7 @@ async fn handle_mcp_proxy_request(
             Ok(outcome) => {
                 crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                     scope: crate::observability::PolicyScope::McpTool,
+                    mcp_tool_name: mcp_context.and_then(crate::surface_context::McpContext::called_tool_name),
                     allow: false,
                     reason: outcome.reason.as_deref(),
                     policy_id: outcome
@@ -15433,6 +15452,7 @@ async fn handle_mcp_proxy_request(
                 error!(channel = channel_name, error = %e, "Failed to evaluate MCP tool policy");
                 crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                     scope: crate::observability::PolicyScope::McpTool,
+                    mcp_tool_name: mcp_context.and_then(crate::surface_context::McpContext::called_tool_name),
                     error: Some(crate::observability::PolicyEvaluationError::EvaluationError),
                     surface_id: Some(config_id),
                     surface_name: Some(state.surface.name.as_str()),
@@ -15467,13 +15487,14 @@ async fn handle_mcp_proxy_request(
     {
         // Fail closed: an unreadable tool name can't be checked against the
         // gates. Checking `""` instead would pass a deny-pattern gate.
-        let tool_name = json_request
+        let called_tool = json_request
             .pointer("/params/name")
             .and_then(|n| n.as_str());
-        let allowed = tool_name.is_some_and(|tool_name| gating.is_tool_call_allowed(tool_name, input));
-        let tool_name = tool_name.unwrap_or_default();
+        let allowed = called_tool.is_some_and(|tool_name| gating.is_tool_call_allowed(tool_name, input));
+        let tool_name = called_tool.unwrap_or_default();
         crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
             scope: crate::observability::PolicyScope::McpTool,
+            mcp_tool_name: called_tool,
             allow: allowed,
             reason: if allowed {
                 None

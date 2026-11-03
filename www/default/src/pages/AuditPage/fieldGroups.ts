@@ -17,6 +17,7 @@ import {
 } from './auditHelpers';
 import { actorLabel, trustErrorClause, type UserNameResolver } from './eventNarrative';
 import { surfaceVariantLabel } from '../../utils/surfaceVariant';
+import { formatDID } from '../../utils/stringUtils';
 import type {
   AuditEntry,
   PolicyChangeData,
@@ -132,14 +133,10 @@ export function fieldGroups(
   }
   if (tc) {
     add(policy, 'Trust leg', tc.leg);
-    // `authority_id` / `entity_id` are omitted on the target-leg
-    // "unavailable" paths (AGENT_CARD_UNAVAILABLE,
-    // TRUST_REGISTRY_METADATA_UNAVAILABLE). `add()` already suppresses
-    // blank values via `fieldStr`, but we route through it explicitly so
-    // the two rows disappear entirely rather than showing an "n/a"
-    // placeholder — matching the wire-shape "not applicable" semantics.
-    add(policy, 'Authority', fieldStr(tc.authority_id), { mono: true });
-    add(policy, 'Entity', fieldStr(tc.entity_id), { mono: true });
+    const authority = fieldStr(tc.authority_id);
+    const entity = fieldStr(tc.entity_id);
+    add(policy, 'Authority', authority && formatDID(authority), { mono: true });
+    add(policy, 'Entity', entity && formatDID(entity), { mono: true });
     policy.push({ term: 'Result', value: tc.ok ? 'Passed' : 'Failed' });
     if (!tc.ok) add(policy, 'Failure', trustErrorClause(tc.error_code, tc.leg));
   }
