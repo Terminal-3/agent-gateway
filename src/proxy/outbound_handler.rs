@@ -482,6 +482,7 @@ pub struct OutboundPipelineContext {
     /// unverifiable). Mutually exclusive with `target_agent_card_unavailable`
     /// (the card must have been fetched for verification to run).
     pub target_identity_failure: Option<crate::trust_registry_verification::TrustCheckIdentityVerificationFailure>,
+    pub target_identity_claim: Option<(String, String)>,
     /// Per-leg Trust Check stage results (populated by
     /// `step_trust_check`). Threaded into every outbound OPA evaluation
     /// via `build_outbound_policy_input`. `None` when the routed Transit
@@ -733,6 +734,7 @@ impl OutboundPipelineContext {
             modern_delegation: None,
             operation: None,
             target_agent_context: None,
+            target_identity_claim: None,
             target_agent_card_unavailable: false,
             target_identity_failure: None,
             trust_check_results: None,
@@ -3060,6 +3062,7 @@ async fn step_collect_trust_context(
     if target_trust_check_present {
         match crate::policies::agent_context::extract_credential_vp_from_card(&card_json) {
             Some(vp) => {
+                ctx.target_identity_claim = crate::policies::agent_context::credential_vp_identity_claim(vp);
                 if let Some(subject_did) = crate::proxy::agent_card_cache::lookup_verified_vp(vp) {
                     agent_ctx.did = Some(subject_did);
                 } else if let Some(issuer) = state.vc_issuer.as_deref() {
@@ -3334,11 +3337,17 @@ fn outbound_actor_did(ctx: &OutboundPipelineContext) -> Option<&str> {
     }
 }
 
-/// DID of the Transit Point's agent, once an earlier step resolved its agent context.
 fn outbound_target_did(ctx: &OutboundPipelineContext) -> Option<&str> {
     ctx.target_agent_context
         .as_ref()
         .and_then(|agent| agent.did.as_deref())
+}
+
+fn outbound_target_claim(ctx: &OutboundPipelineContext) -> Option<(&str, &str)> {
+    outbound_target_did(ctx)?;
+    ctx.target_identity_claim
+        .as_ref()
+        .map(|(claim, value)| (claim.as_str(), value.as_str()))
 }
 
 /// The caller of a Transit Point call, for attributing outbound decisions: the
@@ -3375,6 +3384,7 @@ struct OutboundPolicyAudit<'a> {
     policy_content_hash: Option<&'a str>,
     caller: Option<&'a crate::delegation_vault::audit::AuditCallerContext>,
     target_did: Option<&'a str>,
+    target_claim: Option<(&'a str, &'a str)>,
 }
 
 impl OutboundPolicyAudit<'_> {
@@ -3421,6 +3431,7 @@ impl OutboundPolicyAudit<'_> {
             policy_content_hash: self.policy_content_hash,
             caller: self.caller,
             target_did: self.target_did,
+            target_claim: self.target_claim,
             ..Default::default()
         });
     }
@@ -3488,6 +3499,7 @@ async fn step_gateway_opa_policy(
         policy_content_hash: policy_hash.as_deref(),
         caller: caller.as_ref(),
         target_did: outbound_target_did(ctx),
+        target_claim: outbound_target_claim(ctx),
     };
     match gw_pm.evaluate_policy_decision(&gateway_id, input_value) {
         Ok(decision) if decision.allow => {
@@ -3534,6 +3546,7 @@ fn record_surface_policy_unavailable(
         policy_content_hash: None,
         caller: caller.as_ref(),
         target_did: outbound_target_did(ctx),
+        target_claim: outbound_target_claim(ctx),
     }
     .record_error(error);
     OutboundPipelineError::SurfacePolicyError(error)
@@ -3617,6 +3630,7 @@ async fn step_surface_opa_policy(
         policy_content_hash: policy_hash.as_deref(),
         caller: caller.as_ref(),
         target_did: outbound_target_did(ctx),
+        target_claim: outbound_target_claim(ctx),
     };
     match pm.evaluate_policy_decision(&outbound_key, input_value) {
         Ok(decision) if decision.allow => {
@@ -3758,6 +3772,7 @@ async fn step_transit_point_opa_policy(
         policy_content_hash: policy_hash.as_deref(),
         caller: caller.as_ref(),
         target_did: outbound_target_did(ctx),
+        target_claim: outbound_target_claim(ctx),
     };
     match pm.evaluate_policy_decision(&tp_key, input_value) {
         Ok(decision) if decision.allow => {
@@ -3883,6 +3898,7 @@ async fn step_transit_mcp_tool_gating(
             caller: outbound_caller(ctx).as_ref(),
             flow: crate::observability::PolicyFlow::TransitPoint,
             target_did: outbound_target_did(ctx),
+            target_claim: outbound_target_claim(ctx),
             ..Default::default()
         });
         warn!(
@@ -3936,6 +3952,7 @@ async fn step_transit_mcp_tool_gating(
         flow: crate::observability::PolicyFlow::TransitPoint,
         mcp_tool_name: Some(tool_name.as_str()),
         target_did: outbound_target_did(ctx),
+        target_claim: outbound_target_claim(ctx),
         ..Default::default()
     });
 
@@ -4090,6 +4107,7 @@ fn step_transit_point_response_policy(
             .as_deref(),
         caller: caller.as_ref(),
         target_did: outbound_target_did(ctx),
+        target_claim: outbound_target_claim(ctx),
     };
     if !decision.allow {
         match decision.error {
@@ -6809,6 +6827,7 @@ mod tests {
                     policy_content_hash: None,
                     caller: None,
                     target_did: None,
+                    target_claim: None,
                 }
                 .record(true, None);
 
@@ -6829,6 +6848,7 @@ mod tests {
                     policy_content_hash: Some("sha256:egress"),
                     caller: carried.as_ref(),
                     target_did: None,
+                    target_claim: None,
                 }
                 .record(false, Some("blocked by policy"));
             })
@@ -6891,6 +6911,7 @@ mod tests {
             policy_content_hash: None,
             caller: None,
             target_did,
+            target_claim: None,
         };
         let ((), events) = crate::audit::producer::capture(async {
             audit(Some("did:web:partner.example.com")).record(false, Some("blocked"));
@@ -6935,6 +6956,7 @@ mod tests {
                     policy_content_hash: None,
                     caller: None,
                     target_did: None,
+                    target_claim: None,
                 }
                 .record(true, None);
             })
@@ -6975,6 +6997,7 @@ mod tests {
                     policy_content_hash: None,
                     caller: None,
                     target_did: None,
+                    target_claim: None,
                 }
                 .record_error(crate::observability::PolicyEvaluationError::EvaluationError);
             })
@@ -7051,6 +7074,7 @@ mod tests {
             modern_delegation: None,
             operation: None,
             target_agent_context: None,
+            target_identity_claim: None,
             target_agent_card_unavailable: false,
             target_identity_failure: None,
             trust_check_results: None,

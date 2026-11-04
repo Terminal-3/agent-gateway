@@ -457,8 +457,6 @@ pub struct PolicyDecisionEvent<'a> {
     pub caller: Option<&'a crate::delegation_vault::audit::AuditCallerContext>,
     /// Resolved/derived agent DID for the request, when available.
     pub actor_did: Option<&'a str>,
-    /// The JWT claim and its value `actor_did` was derived from, on a
-    /// `from_jwt_claim` surface. Recorded on the caller.
     pub actor_claim: Option<(&'a str, &'a str)>,
     /// Identifier (or DID) of the gateway making the decision.
     pub gateway_did: Option<&'a str>,
@@ -470,10 +468,9 @@ pub struct PolicyDecisionEvent<'a> {
     pub policy_version: Option<u32>,
     /// `sha256:<hex>` content hash of the exact Rego enforced (attestation).
     pub policy_content_hash: Option<&'a str>,
-    /// The MCP tool a `tools/call` names, when the decision is about one.
     pub mcp_tool_name: Option<&'a str>,
-    /// DID of the Transit Point's agent, when resolved before the decision.
     pub target_did: Option<&'a str>,
+    pub target_claim: Option<(&'a str, &'a str)>,
 }
 
 /// Emit one structured event describing a policy decision.
@@ -699,6 +696,7 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             event
                 .target_did
                 .filter(|did| !did.is_empty()),
+            event.target_claim,
         );
     }
 
@@ -1220,6 +1218,7 @@ mod tests {
                     removed_tools: None,
                     mcp_tool_name: Some("delete_repo"),
                     target_did: Some("did:web:partner.example.com"),
+                    target_claim: None,
                 })
             });
         });
@@ -1563,6 +1562,7 @@ mod tests {
             policy_content_hash: None,
             removed_tools: None,
             target_did: None,
+            target_identity_claim: None,
         };
         let stored = serde_json::to_value(event).unwrap();
         assert!(

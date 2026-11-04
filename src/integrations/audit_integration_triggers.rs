@@ -214,6 +214,7 @@ mod tests {
                 policy_content_hash: Some("sha256:abc".to_string()),
                 removed_tools: None,
                 target_did: None,
+                target_identity_claim: None,
             },
             None,
             None,

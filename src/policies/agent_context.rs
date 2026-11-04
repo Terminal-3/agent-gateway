@@ -476,6 +476,25 @@ fn extract_context_did_from_agent_card(card: &serde_json::Value) -> Option<Strin
 
 /// Extract the stringified `agent-identity-credential/v1` Verifiable
 /// Presentation from a fetched agent card, if present.
+pub fn credential_vp_identity_claim(vp: &str) -> Option<(String, String)> {
+    let vp: serde_json::Value = serde_json::from_str(vp).ok()?;
+    let vc = vp.get("verifiableCredential")?;
+    let subject = vc
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or(vc)
+        .get("credentialSubject")?;
+    let name = subject
+        .get("name")?
+        .as_str()?;
+    let (field, _) = subject
+        .get("identityFields")?
+        .as_object()?
+        .iter()
+        .find(|(_, v)| v.as_str() == Some(name))?;
+    Some((field.clone(), name.to_string()))
+}
+
 pub fn extract_credential_vp_from_card(card: &serde_json::Value) -> Option<&str> {
     let extensions = card
         .get("capabilities")
@@ -1096,6 +1115,20 @@ mod tests {
     // ---------------------------------------------------------------
     // build_agent_context_for_protocol — MCP (_meta) extraction
     // ---------------------------------------------------------------
+
+    #[test]
+    fn credential_vp_identity_claim_names_the_field_the_did_was_issued_for() {
+        let vp = json!({"verifiableCredential": {"credentialSubject": {
+            "id": "did:web:agent", "name": "merlion-transactions",
+            "identityFields": {"agentIdentity.name": "Merlion Transactions", "agentIdentity.agent_id": "merlion-transactions"},
+        }}})
+        .to_string();
+        assert_eq!(
+            credential_vp_identity_claim(&vp),
+            Some(("agentIdentity.agent_id".to_string(), "merlion-transactions".to_string()))
+        );
+        assert_eq!(credential_vp_identity_claim("{}"), None);
+    }
 
     #[tokio::test]
     async fn test_build_agent_context_mcp_reads_tr_extension_from_meta() {

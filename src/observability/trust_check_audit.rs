@@ -112,9 +112,7 @@ pub struct TrustCheckAuditEvent<'a> {
     /// Resolved (or, on a pre-dispatch failure, templated) TRQP entity id.
     /// Same `None` semantics as `authority_id`.
     pub entity_id: Option<&'a str>,
-    /// TRQP action queried, recognition defaults applied.
     pub action: Option<&'a str>,
-    /// TRQP resource queried, recognition defaults applied.
     pub resource: Option<&'a str>,
     pub trust_registry_id: &'a str,
     pub query_type: TrqpQueryType,
@@ -208,8 +206,15 @@ pub fn record_trust_check(event: TrustCheckAuditEvent<'_>) {
     // `trust_checks` category in Settings › Security. The tracing + Prometheus
     // emission above is always on for operational telemetry; only this durable
     // audit record is gated, so toggling the category never blinds ops.
-    // `authority_id` / `entity_id` are recorded in full so the record can be
-    // matched against the registry; `None` omits them from the JSONL.
+    //
+    // `authority_id` / `entity_id` are truncated to the same shape the
+    // dashboard identity page renders (`did:METHOD:FIRST8...LAST8`, with the
+    // `did::channel:FIRST8...LAST8` special case for `did:web:host:channel:UUID`)
+    // so operators see identical strings in the dashboard and the audit
+    // export. Non-`did:` values (including blank strings, a permitted
+    // element config) pass through unchanged. `None` (the target-leg
+    // "unavailable" pre-check paths) is forwarded verbatim so the JSONL
+    // omits the field, matching the wire shape.
     if crate::audit::producer::producer().wants("trust_check") {
         crate::delegation_vault::audit::audit_trust_check(
             Some(surface_id),
@@ -226,6 +231,10 @@ pub fn record_trust_check(event: TrustCheckAuditEvent<'_>) {
     }
 }
 
+/// Produce the audit-log display forms of `authority_id` / `entity_id`
+/// using the shared [`crate::observability::did_display::format_did`]
+/// (defaults `first = 8`, `last = 8`). `None` is preserved so the JSONL
+/// omits the field on the target-leg "unavailable" pre-check paths.
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::sync::{Arc, Mutex};
@@ -770,6 +779,11 @@ mod tests {
         }
     }
 
+    // Non-`did:` prefixed values (blank, URI-style, opaque) pass
+    // through unchanged. Blank `entity_id` is a permitted element
+    // config today; the truncator must not mangle it into anything
+    // else so Rego rules keying off `r.entity_id == ""` keep working
+    // and audit rows still show a blank cell.
     async fn audited_trust_check(event: TrustCheckAuditEvent<'_>) -> serde_json::Value {
         let ((), events) = crate::audit::producer::capture(async {
             record_trust_check(event);
@@ -779,6 +793,10 @@ mod tests {
         serde_json::to_value(&events[0]).expect("serialize record")["event"]["trust_check"].clone()
     }
 
+    // Target-leg pre-check paths (`AGENT_CARD_UNAVAILABLE`,
+    // `TRUST_REGISTRY_METADATA_UNAVAILABLE`) pass `None` so the
+    // JSONL audit sink omits the fields, matching the wire shape
+    // of `TrustCheckResult`.
     #[tokio::test]
     async fn the_audit_record_keeps_the_full_authority_and_entity_ids() {
         let authority = "did:web:agent-gateway-1.example.com:channel:1524042a-2339-4e08-af51-2c5fd43f7b7e";

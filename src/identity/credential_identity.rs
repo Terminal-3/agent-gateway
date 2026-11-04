@@ -615,9 +615,6 @@ pub fn resolve_jwt_claim_identity(
     Ok(CredentialIdentity::Derived { identity_fields, identity_hash })
 }
 
-/// The claim, and its value, a `from_jwt_claim` identity was derived from, read
-/// back from the identity fields [`resolve_jwt_claim_identity`] produced.
-/// `None` for an identity of any other kind.
 pub fn derived_jwt_claim(fields: &HashMap<String, JsonValue>) -> Option<(String, String)> {
     if fields
         .get("credential_type")?

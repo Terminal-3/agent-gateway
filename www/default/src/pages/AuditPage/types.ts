@@ -15,7 +15,6 @@ export interface PolicyDecisionData {
   policy_version?: number | null;
   /** `sha256:<hex>` content hash of the exact Rego enforced (attestation) — matches the SHA shown on the Policies list. */
   policy_content_hash?: string | null;
-  /** DID of the Transit Point's agent, on transit_point decisions once it was resolved. */
   target_did?: string | null;
 }
 
@@ -31,9 +30,7 @@ export interface TrustCheckData {
   authority_id?: string | null;
   /** Same absence semantics as `authority_id`. */
   entity_id?: string | null;
-  /** TRQP action queried, recognition defaults applied. */
   action?: string | null;
-  /** TRQP resource queried, recognition defaults applied. */
   resource?: string | null;
   ok: boolean;
   error_code?: string | null;

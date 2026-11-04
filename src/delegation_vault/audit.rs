@@ -40,7 +40,6 @@ pub fn identity_binding_vp_audit_enabled() -> bool {
     crate::audit::producer::producer().wants("vp_injected")
 }
 
-/// The JWT claim, and its value, a caller's agent DID was derived from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AuditIdentityClaim {
     pub claim: String,
@@ -71,9 +70,6 @@ pub struct AuditCallerContext {
     /// (`fabric_verified`): the value its delegated credentials are keyed by.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub user_identity_hash: Option<String>,
-    /// The claim the caller's agent DID was derived from, on a surface whose
-    /// inbound identity is `from_jwt_claim`. Lets the consumer of the record
-    /// map the DID to its own name for the agent.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub identity_claim: Option<AuditIdentityClaim>,
     /// The paired gateway that sent the request over Fabric, for a
@@ -457,10 +453,10 @@ pub enum DelegationAuditAction {
         /// sees (scope `mcp_tool_list`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         removed_tools: Option<Vec<String>>,
-        /// DID of the agent behind the Transit Point the request was routed
-        /// to, when the gateway resolved it before deciding.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_did: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_identity_claim: Option<AuditIdentityClaim>,
     },
     /// TRQP trust-check outcome. `authority_id` / `entity_id` are
     /// `Option<String>` and omitted from the JSONL on the target-leg
@@ -479,10 +475,8 @@ pub enum DelegationAuditAction {
         /// outside the outbound path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transit_point: Option<String>,
-        /// TRQP action queried, recognition defaults applied.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<String>,
-        /// TRQP resource queried, recognition defaults applied.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<String>,
     },
@@ -1614,6 +1608,7 @@ pub fn audit_policy_decision(
     removed_tools: Option<&[String]>,
     mcp_tool_name: Option<&str>,
     target_did: Option<&str>,
+    target_claim: Option<(&str, &str)>,
 ) {
     emit("policy_decision", || DelegationAuditEvent {
         event_id: new_event_id(),
@@ -1638,6 +1633,10 @@ pub fn audit_policy_decision(
             policy_content_hash: policy_content_hash.map(str::to_string),
             removed_tools: removed_tools.map(<[String]>::to_vec),
             target_did: target_did.map(str::to_string),
+            target_identity_claim: target_claim.map(|(claim, value)| AuditIdentityClaim {
+                claim: claim.to_string(),
+                value: value.to_string(),
+            }),
         },
         agent_did: None,
         agent_identity_did: None,
@@ -2125,6 +2124,7 @@ mod tests {
                 policy_content_hash: None,
                 removed_tools: None,
                 target_did: None,
+                target_identity_claim: None,
             }
             .is_vp_audit()
         );
@@ -2359,6 +2359,7 @@ mod tests {
                 policy_content_hash: None,
                 removed_tools: None,
                 target_did: None,
+                target_identity_claim: None,
             }),
         ];
 
@@ -2454,6 +2455,7 @@ mod tests {
                     policy_content_hash: None,
                     removed_tools: None,
                     target_did: None,
+                    target_identity_claim: None,
                 },
                 agent_did: None,
                 agent_identity_did: None,
@@ -2522,6 +2524,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
             };
             decide(Some(build_caller_context(&identity)));
@@ -2581,6 +2584,7 @@ mod tests {
                 None,
                 Some("admin_reset"),
                 Some("did:web:partner.example.com"),
+                None,
             );
         })
         .await;
