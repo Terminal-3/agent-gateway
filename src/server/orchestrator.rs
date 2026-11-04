@@ -2427,6 +2427,11 @@ pub async fn run_axum_proxy(
             &a2a_proxy_store,
             &definition_stores,
         );
+        crate::observability::config_audit::spawn(crate::observability::config_audit::ConfigStores {
+            surfaces: agent_surface_store.clone(),
+            policies: policy_definition_store.clone(),
+            trust_registries: trust_registry_store.clone(),
+        });
 
         // users — resolved from the passkey/SAML auth storage (no dedicated
         // store, so it isn't covered by register_resource_limit_counters).

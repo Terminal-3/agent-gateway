@@ -458,6 +458,12 @@ pub enum DelegationAuditAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_identity_claim: Option<AuditIdentityClaim>,
     },
+    ConfigObject {
+        kind: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        object: Option<serde_json::Value>,
+    },
     /// TRQP trust-check outcome. `authority_id` / `entity_id` are
     /// `Option<String>` and omitted from the JSONL on the target-leg
     /// "unavailable" pre-check paths (`AGENT_CARD_UNAVAILABLE`,
@@ -1399,6 +1405,7 @@ pub fn action_category(action: &DelegationAuditAction) -> &'static str {
     match action {
         DelegationAuditAction::PolicyDecision { .. } => "policy_decision",
         DelegationAuditAction::TrustCheck { .. } => "trust_check",
+        DelegationAuditAction::ConfigObject { .. } => "config_object",
         DelegationAuditAction::TraceTerminated { .. } => "trace_terminated",
         DelegationAuditAction::ConsentGranted => "consent_granted",
         DelegationAuditAction::TokenInjected => "token_injected",
@@ -1669,6 +1676,43 @@ pub fn audit_policy_decision(
 /// `authority_id` / `entity_id` are `None` on the target-leg pre-check
 /// paths (`AGENT_CARD_UNAVAILABLE`, `TRUST_REGISTRY_METADATA_UNAVAILABLE`)
 /// so the emitted JSONL omits them, matching the wire shape.
+pub fn audit_config_object(
+    kind: &str,
+    id: &str,
+    object: Option<serde_json::Value>,
+) {
+    emit("config_object", || DelegationAuditEvent {
+        event_id: new_event_id(),
+        timestamp: Utc::now().to_rfc3339(),
+        event: DelegationAuditAction::ConfigObject {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            object,
+        },
+        agent_did: None,
+        agent_identity_did: None,
+        user_identity_hash: None,
+        provider_id: None,
+        provider_name: None,
+        surface_id: None,
+        channel_name: None,
+        target_endpoint: None,
+        protocol: None,
+        scopes: None,
+        token_id: None,
+        inject_as: None,
+        via_fabric: false,
+        caller: None,
+        mcp_tool_name: None,
+        vp_jwt: None,
+        vp_fingerprint: None,
+        trace_id: None,
+        request_id: None,
+        surface_variant: None,
+        detail: None,
+    });
+}
+
 pub fn audit_trust_check(
     surface_id: Option<&str>,
     transit_point: Option<&str>,

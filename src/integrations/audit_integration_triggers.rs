@@ -481,6 +481,7 @@ mod tests {
             | DelegationAuditAction::ElicitationTimedOut
             | DelegationAuditAction::PolicyDecision { .. }
             | DelegationAuditAction::TrustCheck { .. }
+            | DelegationAuditAction::ConfigObject { .. }
             | DelegationAuditAction::TraceTerminated { .. }
             | DelegationAuditAction::PaymentEvent(_)
             | DelegationAuditAction::AuthFailed { .. }
@@ -527,6 +528,11 @@ mod tests {
                 transit_point: None,
                 action: None,
                 resource: None,
+            },
+            DelegationAuditAction::ConfigObject {
+                kind: "surface".to_string(),
+                id: "s".to_string(),
+                object: None,
             },
             DelegationAuditAction::TraceTerminated {
                 own_trace_id: "own".to_string(),
