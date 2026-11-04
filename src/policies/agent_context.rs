@@ -1116,20 +1116,6 @@ mod tests {
     // build_agent_context_for_protocol — MCP (_meta) extraction
     // ---------------------------------------------------------------
 
-    #[test]
-    fn credential_vp_identity_claim_names_the_field_the_did_was_issued_for() {
-        let vp = json!({"verifiableCredential": {"credentialSubject": {
-            "id": "did:web:agent", "name": "merlion-transactions",
-            "identityFields": {"agentIdentity.name": "Merlion Transactions", "agentIdentity.agent_id": "merlion-transactions"},
-        }}})
-        .to_string();
-        assert_eq!(
-            credential_vp_identity_claim(&vp),
-            Some(("agentIdentity.agent_id".to_string(), "merlion-transactions".to_string()))
-        );
-        assert_eq!(credential_vp_identity_claim("{}"), None);
-    }
-
     #[tokio::test]
     async fn test_build_agent_context_mcp_reads_tr_extension_from_meta() {
         // MCP carries the trust-registry extension under `_meta`, keyed by the

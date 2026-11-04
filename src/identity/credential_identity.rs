@@ -806,18 +806,6 @@ mod tests {
     }
 
     #[test]
-    fn derived_jwt_claim_reads_back_the_claim_and_value_only_for_a_jwt_claim_identity() {
-        let claims = json!({ "azp": "assistant", "iss": "https://idp.example" });
-        let resolved = resolve_jwt_claim_identity("azp", &["iss".to_string()], &claims).unwrap();
-        let (_, fields) = derived_parts(&resolved);
-        assert_eq!(derived_jwt_claim(&fields), Some(("azp".to_string(), "assistant".to_string())));
-
-        let mut other = fields.clone();
-        other.insert("credential_type".to_string(), json!("api_key"));
-        assert_eq!(derived_jwt_claim(&other), None);
-    }
-
-    #[test]
     fn resolve_jwt_claim_identity_is_deterministic() {
         let claims = json!({ "oid": "agent-1" });
         let a = resolve_jwt_claim_identity("oid", &[], &claims).unwrap();

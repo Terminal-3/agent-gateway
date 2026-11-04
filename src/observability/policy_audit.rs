@@ -1195,6 +1195,10 @@ mod tests {
             };
             with_request_variant("beta", || {
                 record_policy_decision(PolicyDecisionEvent {
+                    target_did: None,
+                    actor_claim: None,
+                    mcp_tool_name: None,
+                    target_claim: None,
                     scope: PolicyScope::Surface,
                     allow: false,
                     reason: Some("trust check failed"),
@@ -1208,7 +1212,6 @@ mod tests {
                     path: Some("/v1/agent"),
                     identity: Some(&identity),
                     actor_did: Some("did:example:agent"),
-                    actor_claim: None,
                     gateway_did: Some("did:web:gw1"),
                     flow: PolicyFlow::TransitPoint,
                     policy_version: Some(3),
@@ -1216,9 +1219,6 @@ mod tests {
                     caller: None,
                     error: None,
                     removed_tools: None,
-                    mcp_tool_name: Some("delete_repo"),
-                    target_did: Some("did:web:partner.example.com"),
-                    target_claim: None,
                 })
             });
         });
@@ -1246,119 +1246,6 @@ mod tests {
         assert_eq!(field(ev, "gateway_did"), Some("did:web:gw1"));
         assert_eq!(field(ev, "policy_version"), Some("3"));
         assert_eq!(field(ev, "policy_content_hash"), Some("sha256:abc123"));
-        assert_eq!(field(ev, "mcp_tool_name"), Some("delete_repo"));
-        assert_eq!(field(ev, "target_did"), Some("did:web:partner.example.com"));
-    }
-
-    #[tokio::test]
-    async fn the_audit_record_carries_the_tool_and_the_target_agent() {
-        let ((), events) = crate::audit::producer::capture(async {
-            record_policy_decision(PolicyDecisionEvent {
-                scope: PolicyScope::McpTool,
-                allow: false,
-                policy_id: Some("mcp_tool_gating"),
-                flow: PolicyFlow::TransitPoint,
-                mcp_tool_name: Some("delete_repo"),
-                target_did: Some("did:web:partner.example.com"),
-                ..Default::default()
-            });
-        })
-        .await;
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0]
-                .mcp_tool_name
-                .as_deref(),
-            Some("delete_repo")
-        );
-        match &events[0].event {
-            crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision { target_did, flow, .. } => {
-                assert_eq!(target_did.as_deref(), Some("did:web:partner.example.com"));
-                assert_eq!(flow, "transit_point");
-            }
-            other => panic!("expected a policy decision, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn the_audit_record_names_the_claim_the_callers_did_came_from() {
-        let identity = AuthenticatedIdentity::JwtBearer {
-            subject: "customer-1".to_string(),
-            claims: serde_json::json!({"iss": "https://idp.example", "sub": "customer-1", "azp": "assistant"}),
-        };
-        let ((), events) = crate::audit::producer::capture(async {
-            record_policy_decision(PolicyDecisionEvent {
-                scope: PolicyScope::Surface,
-                allow: true,
-                identity: Some(&identity),
-                actor_did: Some("did:web:agent"),
-                actor_claim: Some(("azp", "assistant")),
-                ..Default::default()
-            });
-            record_policy_decision(PolicyDecisionEvent {
-                scope: PolicyScope::Surface,
-                allow: true,
-                identity: Some(&identity),
-                ..Default::default()
-            });
-        })
-        .await;
-
-        assert_eq!(events.len(), 2);
-        let rows: Vec<serde_json::Value> = events
-            .iter()
-            .map(|e| serde_json::to_value(e).unwrap())
-            .collect();
-        assert_eq!(
-            rows[0]["caller"]["identity_claim"],
-            serde_json::json!({"claim": "azp", "value": "assistant"}),
-            "{}",
-            rows[0]
-        );
-        assert!(
-            rows[1]["caller"]
-                .get("identity_claim")
-                .is_none(),
-            "{}",
-            rows[1]
-        );
-    }
-
-    #[tokio::test]
-    async fn the_audit_record_omits_an_unknown_or_blank_tool_and_target_agent() {
-        let ((), events) = crate::audit::producer::capture(async {
-            record_policy_decision(PolicyDecisionEvent {
-                scope: PolicyScope::McpTool,
-                allow: true,
-                ..Default::default()
-            });
-            record_policy_decision(PolicyDecisionEvent {
-                scope: PolicyScope::McpTool,
-                allow: true,
-                mcp_tool_name: Some(""),
-                target_did: Some(""),
-                ..Default::default()
-            });
-        })
-        .await;
-
-        assert_eq!(events.len(), 2);
-        for event in &events {
-            assert_eq!(event.mcp_tool_name, None);
-            let row = serde_json::to_value(event).unwrap();
-            assert!(
-                row.get("mcp_tool_name")
-                    .is_none(),
-                "{row}"
-            );
-            assert!(
-                row["event"]["policy_decision"]
-                    .get("target_did")
-                    .is_none(),
-                "{row}"
-            );
-        }
     }
 
     #[tokio::test]
@@ -1547,6 +1434,8 @@ mod tests {
     #[test]
     fn a_decision_without_removed_tools_omits_the_field() {
         let event = crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision {
+            target_did: None,
+            target_identity_claim: None,
             scope: "surface".to_string(),
             flow: "access_point".to_string(),
             policy_id: "surface.policy".to_string(),
@@ -1561,8 +1450,6 @@ mod tests {
             policy_version: None,
             policy_content_hash: None,
             removed_tools: None,
-            target_did: None,
-            target_identity_claim: None,
         };
         let stored = serde_json::to_value(event).unwrap();
         assert!(

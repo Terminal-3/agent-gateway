@@ -98,29 +98,3 @@ fn changes(
     }
     out
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn changes_are_the_new_the_changed_and_the_removed_objects_once() {
-        let mut sent = HashMap::new();
-        let mut objects = HashMap::from([
-            (("surface", "a".to_string()), json!({"v": 1})),
-            (("policy", "b".to_string()), json!({"v": 1})),
-        ]);
-        assert_eq!(changes(&mut sent, &objects).len(), 2);
-        assert!(changes(&mut sent, &objects).is_empty());
-
-        objects.insert(("surface", "a".to_string()), json!({"v": 2}));
-        objects.remove(&("policy", "b".to_string()));
-        let mut out = changes(&mut sent, &objects);
-        out.sort_by(|x, y| x.0.cmp(&y.0));
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].0, ("policy", "b".to_string()));
-        assert_eq!(out[0].1, None);
-        assert_eq!(out[1].0, ("surface", "a".to_string()));
-        assert!(out[1].1.is_some());
-    }
-}

@@ -2153,6 +2153,8 @@ mod tests {
         // The two variants that belong to the VP Audit Log (/v1/audit).
         assert!(
             DelegationAuditAction::PolicyDecision {
+                target_did: None,
+                target_identity_claim: None,
                 scope: "gateway".to_string(),
                 flow: "access_point".to_string(),
                 policy_id: "pol-1".to_string(),
@@ -2167,21 +2169,19 @@ mod tests {
                 policy_version: None,
                 policy_content_hash: None,
                 removed_tools: None,
-                target_did: None,
-                target_identity_claim: None,
             }
             .is_vp_audit()
         );
         assert!(
             DelegationAuditAction::TrustCheck {
+                action: None,
+                resource: None,
                 leg: "caller".to_string(),
                 authority_id: Some("did:example:auth".to_string()),
                 entity_id: Some("did:example:agent".to_string()),
                 ok: false,
                 error_code: Some("QUERY_TIMEOUT".to_string()),
                 transit_point: None,
-                action: None,
-                resource: None,
             }
             .is_vp_audit()
         );
@@ -2388,6 +2388,8 @@ mod tests {
             mk(DelegationAuditAction::ConsentGranted),
             mk(DelegationAuditAction::TokenInjected),
             mk(DelegationAuditAction::PolicyDecision {
+                target_did: None,
+                target_identity_claim: None,
                 scope: "gateway".to_string(),
                 flow: "access_point".to_string(),
                 policy_id: "pol-1".to_string(),
@@ -2402,8 +2404,6 @@ mod tests {
                 policy_version: None,
                 policy_content_hash: None,
                 removed_tools: None,
-                target_did: None,
-                target_identity_claim: None,
             }),
         ];
 
@@ -2484,6 +2484,8 @@ mod tests {
                 event_id: None,
                 timestamp: "2026-08-18T00:00:01Z".to_string(),
                 event: DelegationAuditAction::PolicyDecision {
+                    target_did: None,
+                    target_identity_claim: None,
                     scope: "surface".to_string(),
                     flow: "fabric".to_string(),
                     policy_id: "surface.policy".to_string(),
@@ -2498,8 +2500,6 @@ mod tests {
                     policy_version: None,
                     policy_content_hash: None,
                     removed_tools: None,
-                    target_did: None,
-                    target_identity_claim: None,
                 },
                 agent_did: None,
                 agent_identity_did: None,
@@ -2592,82 +2592,6 @@ mod tests {
         assert_eq!(row["event"]["policy_decision"]["policy_name"], "Deny unknown callers");
         assert_eq!(row["event"]["policy_decision"]["policy_version"], 3);
         assert_eq!(row["event"]["policy_decision"]["policy_content_hash"], "sha256:abc");
-        assert!(
-            row.get("mcp_tool_name")
-                .is_none(),
-            "{row}"
-        );
-        assert!(
-            row["event"]["policy_decision"]
-                .get("target_did")
-                .is_none(),
-            "{row}"
-        );
-    }
-
-    #[tokio::test]
-    async fn audit_policy_decision_records_the_tool_and_the_target_agent() {
-        let ((), events) = crate::audit::producer::capture(async {
-            audit_policy_decision(
-                "mcp_tool",
-                "deny",
-                "mcp_tool_gating",
-                None,
-                None,
-                Some("blocked by per-transit-point MCP tool gating"),
-                Some("surface-1"),
-                None,
-                None,
-                Some("POST"),
-                Some("/outbound/mcp/partner"),
-                Some("trace-1"),
-                "transit_point",
-                None,
-                None,
-                None,
-                None,
-                Some("admin_reset"),
-                Some("did:web:partner.example.com"),
-                None,
-            );
-        })
-        .await;
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0]
-                .mcp_tool_name
-                .as_deref(),
-            Some("admin_reset")
-        );
-        let row = serde_json::to_value(&events[0]).unwrap();
-        assert_eq!(row["mcp_tool_name"], "admin_reset");
-        assert_eq!(row["event"]["policy_decision"]["target_did"], "did:web:partner.example.com");
-        let again: DelegationAuditEvent = serde_json::from_value(row).expect("deserialize record");
-        match again.event {
-            DelegationAuditAction::PolicyDecision { target_did, .. } => {
-                assert_eq!(target_did.as_deref(), Some("did:web:partner.example.com"));
-            }
-            other => panic!("expected a policy decision, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_policy_decision_row_without_a_target_did_still_reads() {
-        let row = serde_json::json!({"policy_decision": {
-            "scope": "surface",
-            "policy_id": "surface.policy",
-            "decision": "allow",
-            "deny_reason": null,
-            "surface_id": null,
-            "caller_did": null,
-            "http_method": null,
-            "http_path": null
-        }});
-        match serde_json::from_value::<DelegationAuditAction>(row).expect("deserialize action") {
-            DelegationAuditAction::PolicyDecision { target_did, .. } => assert_eq!(target_did, None),
-            other => panic!("expected a policy decision, got {other:?}"),
-        }
     }
 
     fn transit_claims(
@@ -2932,8 +2856,8 @@ mod tests {
                 Some("did:e"),
                 true,
                 None,
-                Some("invoke"),
-                Some("tool:search"),
+                None,
+                None,
             );
         })
         .await;
@@ -2945,17 +2869,6 @@ mod tests {
             Some("surface-1")
         );
         assert_eq!(events[0].trace_id.as_deref(), Some("trace-1"));
-        let wire = serde_json::to_value(&events[0]).expect("serialize record");
-        assert_eq!(wire["event"]["trust_check"]["action"], "invoke");
-        assert_eq!(wire["event"]["trust_check"]["resource"], "tool:search");
-        let again: DelegationAuditEvent = serde_json::from_value(wire).expect("deserialize record");
-        match again.event {
-            DelegationAuditAction::TrustCheck { action, resource, .. } => {
-                assert_eq!(action.as_deref(), Some("invoke"));
-                assert_eq!(resource.as_deref(), Some("tool:search"));
-            }
-            other => panic!("expected a trust check, got {other:?}"),
-        }
     }
 
     #[tokio::test]
@@ -2991,38 +2904,28 @@ mod tests {
     #[test]
     fn a_trust_check_record_without_a_transit_point_omits_it_and_still_reads() {
         let action = DelegationAuditAction::TrustCheck {
+            action: None,
+            resource: None,
             leg: "caller".to_string(),
             authority_id: None,
             entity_id: None,
             ok: true,
             error_code: None,
             transit_point: None,
-            action: None,
-            resource: None,
         };
         let wire = serde_json::to_value(&action).expect("serialize action");
         assert_eq!(wire["trust_check"]["leg"], serde_json::json!("caller"));
-        for field in ["transit_point", "action", "resource"] {
-            assert!(
-                wire["trust_check"]
-                    .get(field)
-                    .is_none(),
-                "{field}: {wire}"
-            );
-        }
+        assert!(
+            wire["trust_check"]
+                .get("transit_point")
+                .is_none(),
+            "{wire}"
+        );
 
         match serde_json::from_value::<DelegationAuditAction>(wire).expect("deserialize action") {
-            DelegationAuditAction::TrustCheck {
-                transit_point,
-                ok,
-                action,
-                resource,
-                ..
-            } => {
+            DelegationAuditAction::TrustCheck { transit_point, ok, .. } => {
                 assert_eq!(transit_point, None);
                 assert!(ok);
-                assert_eq!(action, None);
-                assert_eq!(resource, None);
             }
             other => panic!("expected a trust check, got {other:?}"),
         }

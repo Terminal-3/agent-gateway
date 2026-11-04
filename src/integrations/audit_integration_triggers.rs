@@ -199,6 +199,8 @@ mod tests {
     fn policy_decision(decision: &str) -> DelegationAuditEvent {
         let mut event = audit_event(
             DelegationAuditAction::PolicyDecision {
+                target_did: None,
+                target_identity_claim: None,
                 scope: "surface".to_string(),
                 flow: "access_point".to_string(),
                 policy_id: "surface.policy".to_string(),
@@ -213,8 +215,6 @@ mod tests {
                 policy_version: Some(3),
                 policy_content_hash: Some("sha256:abc".to_string()),
                 removed_tools: None,
-                target_did: None,
-                target_identity_claim: None,
             },
             None,
             None,
@@ -520,14 +520,14 @@ mod tests {
             DelegationAuditAction::ElicitationTimedOut,
             policy_decision("allow").event,
             DelegationAuditAction::TrustCheck {
+                action: None,
+                resource: None,
                 leg: "caller".to_string(),
                 authority_id: None,
                 entity_id: None,
                 ok: true,
                 error_code: None,
                 transit_point: None,
-                action: None,
-                resource: None,
             },
             DelegationAuditAction::ConfigObject {
                 kind: "surface".to_string(),

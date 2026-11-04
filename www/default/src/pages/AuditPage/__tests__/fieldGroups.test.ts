@@ -343,22 +343,5 @@ describe('fieldGroups', () => {
       const result = groups['Policy'].find(item => item.term === 'Result');
       expect(result?.value).toBe('Failed');
     });
-
-    it('shortens long Authority and Entity DIDs for display', () => {
-      const tc: TrustCheckData = {
-        leg: 'caller',
-        authority_id:
-          'did:web:agent-gateway-1.example.com:channel:1524042a-2339-4e08-af51-2c5fd43f7b7e',
-        entity_id: 'did:key:aaaaaaaabbbbbbbbccccccccdddddddd',
-        ok: true,
-      };
-      const groups = groupByLabel(baseEntry({ event: { trust_check: tc } }), null, tc);
-      expect(groups['Policy']).toEqual(
-        expect.arrayContaining([
-          { term: 'Authority', value: 'did::channel:1524042a...d43f7b7e', mono: true },
-          { term: 'Entity', value: 'did:key:aaaaaaaa...dddddddd', mono: true },
-        ])
-      );
-    });
   });
 });

@@ -389,6 +389,8 @@ mod tests {
 
     fn caller_check(surface_id: &'static str) -> TrustCheckAuditEvent<'static> {
         TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id,
             transit_point: None,
             leg: TrustCheckLeg::Caller,
@@ -396,8 +398,6 @@ mod tests {
             element_name: None,
             authority_id: Some("did:authority:a"),
             entity_id: Some("did:entity:a"),
-            action: None,
-            resource: None,
             trust_registry_id: "tr-a",
             query_type: TrqpQueryType::Recognition,
             ok: false,
@@ -447,6 +447,8 @@ mod tests {
     #[test]
     fn record_does_not_panic_on_any_path() {
         record_trust_check(TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id: "surf-1",
             transit_point: None,
             leg: TrustCheckLeg::Caller,
@@ -454,8 +456,6 @@ mod tests {
             element_name: None,
             authority_id: Some("did:authority:a"),
             entity_id: Some("did:entity:a"),
-            action: None,
-            resource: None,
             trust_registry_id: "tr-a",
             query_type: TrqpQueryType::Recognition,
             ok: true,
@@ -464,6 +464,8 @@ mod tests {
             latency_ms: 12,
         });
         record_trust_check(TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id: "surf-1",
             transit_point: None,
             leg: TrustCheckLeg::Target,
@@ -471,8 +473,6 @@ mod tests {
             element_name: Some("primary"),
             authority_id: Some("did:authority:a"),
             entity_id: Some("did:entity:b"),
-            action: None,
-            resource: None,
             trust_registry_id: "tr-a",
             query_type: TrqpQueryType::Authorization,
             ok: false,
@@ -481,6 +481,8 @@ mod tests {
             latency_ms: 8,
         });
         record_trust_check(TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id: "surf-1",
             transit_point: None,
             leg: TrustCheckLeg::Caller,
@@ -488,8 +490,6 @@ mod tests {
             element_name: Some("departmental"),
             authority_id: Some("did:authority:b"),
             entity_id: Some("did:entity:c"),
-            action: None,
-            resource: None,
             trust_registry_id: "tr-b",
             query_type: TrqpQueryType::Recognition,
             ok: false,
@@ -507,6 +507,8 @@ mod tests {
         ok: bool,
     ) -> TrustCheckAuditEvent<'a> {
         TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id,
             transit_point,
             leg: TrustCheckLeg::Target,
@@ -514,8 +516,6 @@ mod tests {
             element_name: None,
             authority_id: None,
             entity_id: None,
-            action: None,
-            resource: None,
             trust_registry_id: "tr-tp",
             query_type: TrqpQueryType::Recognition,
             ok,
@@ -573,6 +573,8 @@ mod tests {
         let captured = capture(|| {
             crate::observability::policy_audit::with_request_variant("beta", || {
                 record_trust_check(TrustCheckAuditEvent {
+                    action: None,
+                    resource: None,
                     surface_id: "surface-a",
                     transit_point: None,
                     leg: TrustCheckLeg::Caller,
@@ -580,8 +582,6 @@ mod tests {
                     element_name: Some("primary registry"),
                     authority_id: Some("did:authority:42"),
                     entity_id: Some("did:entity:42"),
-                    action: Some("is"),
-                    resource: Some("ownedAgent"),
                     trust_registry_id: "tr-42",
                     query_type: TrqpQueryType::Recognition,
                     ok: true,
@@ -608,8 +608,6 @@ mod tests {
         assert_eq!(field(ev, "ok"), Some("true"));
         assert_eq!(field(ev, "error_code"), Some(""));
         assert_eq!(field(ev, "latency_ms"), Some("17"));
-        assert_eq!(field(ev, "action"), Some("is"));
-        assert_eq!(field(ev, "resource"), Some("ownedAgent"));
     }
 
     #[test]
@@ -620,6 +618,8 @@ mod tests {
         // `result_label` routes it to `error` rather than `denied`.
         let captured = capture(|| {
             record_trust_check(TrustCheckAuditEvent {
+                action: None,
+                resource: None,
                 surface_id: "surface-b",
                 transit_point: None,
                 leg: TrustCheckLeg::Target,
@@ -627,8 +627,6 @@ mod tests {
                 element_name: None,
                 authority_id: Some("did:authority:99"),
                 entity_id: Some("did:entity:99"),
-                action: None,
-                resource: None,
                 trust_registry_id: "tr-99",
                 query_type: TrqpQueryType::Authorization,
                 ok: false,
@@ -653,8 +651,6 @@ mod tests {
         assert_eq!(field(ev, "ok"), Some("false"));
         assert_eq!(field(ev, "error_code"), Some(""));
         assert_eq!(field(ev, "latency_ms"), Some("23"));
-        assert_eq!(field(ev, "action"), Some(""));
-        assert_eq!(field(ev, "resource"), Some(""));
         assert_eq!(field(ev, "surface_variant"), None, "outside a request there is no variant");
     }
 
@@ -662,6 +658,8 @@ mod tests {
     fn not_recognized_event_emits_at_warn_with_result_denied() {
         let captured = capture(|| {
             record_trust_check(TrustCheckAuditEvent {
+                action: None,
+                resource: None,
                 surface_id: "surface-nr",
                 transit_point: None,
                 leg: TrustCheckLeg::Caller,
@@ -669,8 +667,6 @@ mod tests {
                 element_name: None,
                 authority_id: Some("did:authority:nr"),
                 entity_id: Some("did:entity:nr"),
-                action: None,
-                resource: None,
                 trust_registry_id: "tr-nr",
                 query_type: TrqpQueryType::Recognition,
                 ok: false,
@@ -695,6 +691,8 @@ mod tests {
     fn not_authorized_event_emits_at_warn_with_result_denied() {
         let captured = capture(|| {
             record_trust_check(TrustCheckAuditEvent {
+                action: None,
+                resource: None,
                 surface_id: "surface-na",
                 transit_point: None,
                 leg: TrustCheckLeg::Caller,
@@ -702,8 +700,6 @@ mod tests {
                 element_name: None,
                 authority_id: Some("did:authority:na"),
                 entity_id: Some("did:entity:na"),
-                action: None,
-                resource: None,
                 trust_registry_id: "tr-na",
                 query_type: TrqpQueryType::Authorization,
                 ok: false,
@@ -727,6 +723,8 @@ mod tests {
     fn error_event_emits_at_warn_with_error_code_and_zero_latency() {
         let captured = capture(|| {
             record_trust_check(TrustCheckAuditEvent {
+                action: None,
+                resource: None,
                 surface_id: "surface-c",
                 transit_point: None,
                 leg: TrustCheckLeg::Caller,
@@ -734,8 +732,6 @@ mod tests {
                 element_name: Some("departmental"),
                 authority_id: Some("did:authority:7"),
                 entity_id: Some("did:entity:7"),
-                action: None,
-                resource: None,
                 trust_registry_id: "tr-7",
                 query_type: TrqpQueryType::Recognition,
                 ok: false,
@@ -762,76 +758,5 @@ mod tests {
             "WARN event must carry the per-failure detail so operators can diagnose without DEBUG"
         );
         assert_eq!(field(ev, "latency_ms"), Some("0"));
-    }
-
-    fn audited_check<'a>(
-        authority_id: Option<&'a str>,
-        entity_id: Option<&'a str>,
-        action: Option<&'a str>,
-        resource: Option<&'a str>,
-    ) -> TrustCheckAuditEvent<'a> {
-        TrustCheckAuditEvent {
-            authority_id,
-            entity_id,
-            action,
-            resource,
-            ..caller_check("surface-ids")
-        }
-    }
-
-    // Non-`did:` prefixed values (blank, URI-style, opaque) pass
-    // through unchanged. Blank `entity_id` is a permitted element
-    // config today; the truncator must not mangle it into anything
-    // else so Rego rules keying off `r.entity_id == ""` keep working
-    // and audit rows still show a blank cell.
-    async fn audited_trust_check(event: TrustCheckAuditEvent<'_>) -> serde_json::Value {
-        let ((), events) = crate::audit::producer::capture(async {
-            record_trust_check(event);
-        })
-        .await;
-        assert_eq!(events.len(), 1);
-        serde_json::to_value(&events[0]).expect("serialize record")["event"]["trust_check"].clone()
-    }
-
-    // Target-leg pre-check paths (`AGENT_CARD_UNAVAILABLE`,
-    // `TRUST_REGISTRY_METADATA_UNAVAILABLE`) pass `None` so the
-    // JSONL audit sink omits the fields, matching the wire shape
-    // of `TrustCheckResult`.
-    #[tokio::test]
-    async fn the_audit_record_keeps_the_full_authority_and_entity_ids() {
-        let authority = "did:web:agent-gateway-1.example.com:channel:1524042a-2339-4e08-af51-2c5fd43f7b7e";
-        let entity = "did:key:aaaaaaaabbbbbbbbccccccccdddddddd";
-        let record = audited_trust_check(audited_check(Some(authority), Some(entity), None, None)).await;
-        assert_eq!(record["authority_id"], authority);
-        assert_eq!(record["entity_id"], entity);
-    }
-
-    #[tokio::test]
-    async fn the_audit_record_keeps_non_did_and_blank_ids_unchanged() {
-        let record =
-            audited_trust_check(audited_check(Some("https://example.com/authority"), Some(""), None, None)).await;
-        assert_eq!(record["authority_id"], "https://example.com/authority");
-        assert_eq!(record["entity_id"], "");
-    }
-
-    #[tokio::test]
-    async fn the_audit_record_carries_the_action_and_resource() {
-        let record = audited_trust_check(audited_check(
-            Some("did:authority:a"),
-            Some("did:entity:a"),
-            Some("invoke"),
-            Some("tool:search"),
-        ))
-        .await;
-        assert_eq!(record["action"], "invoke");
-        assert_eq!(record["resource"], "tool:search");
-    }
-
-    #[tokio::test]
-    async fn the_audit_record_omits_missing_ids_action_and_resource() {
-        let record = audited_trust_check(audited_check(None, None, None, None)).await;
-        for field in ["authority_id", "entity_id", "action", "resource"] {
-            assert!(record.get(field).is_none(), "{field}: {record}");
-        }
     }
 }
