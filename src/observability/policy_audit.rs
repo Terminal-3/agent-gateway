@@ -379,10 +379,17 @@ fn caller_fields(identity: &AuthenticatedIdentity) -> (&'static str, String, Opt
 /// The caller a decision is attributed to in the VP Audit Log: the leg's own
 /// authenticated identity, else the caller context carried onto it.
 fn decision_caller(event: &PolicyDecisionEvent<'_>) -> Option<crate::delegation_vault::audit::AuditCallerContext> {
-    event
+    let mut caller = event
         .identity
         .map(crate::delegation_vault::audit::build_caller_context)
-        .or_else(|| event.caller.cloned())
+        .or_else(|| event.caller.cloned())?;
+    if let Some((claim, value)) = event.actor_claim {
+        caller.identity_claim = Some(crate::delegation_vault::audit::AuditIdentityClaim {
+            claim: claim.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Some(caller)
 }
 
 /// Why a policy could not reach a decision. The request is denied (fail
@@ -450,6 +457,9 @@ pub struct PolicyDecisionEvent<'a> {
     pub caller: Option<&'a crate::delegation_vault::audit::AuditCallerContext>,
     /// Resolved/derived agent DID for the request, when available.
     pub actor_did: Option<&'a str>,
+    /// The JWT claim and its value `actor_did` was derived from, on a
+    /// `from_jwt_claim` surface. Recorded on the caller.
+    pub actor_claim: Option<(&'a str, &'a str)>,
     /// Identifier (or DID) of the gateway making the decision.
     pub gateway_did: Option<&'a str>,
     /// Which request flow produced the decision (access point / transit point /
@@ -989,6 +999,7 @@ mod tests {
             claims: serde_json::json!({"email": "ada@example.com"}),
         };
         let carried = crate::delegation_vault::audit::AuditCallerContext {
+            identity_claim: None,
             auth_method: "transit_token".to_string(),
             iss: None,
             aud: None,
@@ -1199,6 +1210,7 @@ mod tests {
                     path: Some("/v1/agent"),
                     identity: Some(&identity),
                     actor_did: Some("did:example:agent"),
+                    actor_claim: None,
                     gateway_did: Some("did:web:gw1"),
                     flow: PolicyFlow::TransitPoint,
                     policy_version: Some(3),
@@ -1268,6 +1280,50 @@ mod tests {
             }
             other => panic!("expected a policy decision, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn the_audit_record_names_the_claim_the_callers_did_came_from() {
+        let identity = AuthenticatedIdentity::JwtBearer {
+            subject: "customer-1".to_string(),
+            claims: serde_json::json!({"iss": "https://idp.example", "sub": "customer-1", "azp": "assistant"}),
+        };
+        let ((), events) = crate::audit::producer::capture(async {
+            record_policy_decision(PolicyDecisionEvent {
+                scope: PolicyScope::Surface,
+                allow: true,
+                identity: Some(&identity),
+                actor_did: Some("did:web:agent"),
+                actor_claim: Some(("azp", "assistant")),
+                ..Default::default()
+            });
+            record_policy_decision(PolicyDecisionEvent {
+                scope: PolicyScope::Surface,
+                allow: true,
+                identity: Some(&identity),
+                ..Default::default()
+            });
+        })
+        .await;
+
+        assert_eq!(events.len(), 2);
+        let rows: Vec<serde_json::Value> = events
+            .iter()
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect();
+        assert_eq!(
+            rows[0]["caller"]["identity_claim"],
+            serde_json::json!({"claim": "azp", "value": "assistant"}),
+            "{}",
+            rows[0]
+        );
+        assert!(
+            rows[1]["caller"]
+                .get("identity_claim")
+                .is_none(),
+            "{}",
+            rows[1]
+        );
     }
 
     #[tokio::test]

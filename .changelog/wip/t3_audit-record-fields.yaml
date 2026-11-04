@@ -23,6 +23,13 @@ changes:
         A trust_check record now carries the TRQP action and resource the element queried, with
         the recognition defaults applied, or the element's configured values when its templates
         could not be resolved. The trust_check_audit log line carries them too.
+    - timestamp: '2026-11-04T10:30:00Z'
+      title: Name the claim a caller's DID came from on policy decision records
+      description: >-
+        On a surface whose inbound identity is from_jwt_claim, a policy_decision record's caller
+        now carries identity_claim, the claim and its value the caller's agent DID was derived
+        from, so the consumer of the record can map the DID to its own name for the agent. It is
+        absent for an identity of any other kind.
   changed:
     - timestamp: '2026-11-03T12:15:00Z'
       title: Keep full authority and entity ids on trust check records

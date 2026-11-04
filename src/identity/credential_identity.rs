@@ -615,6 +615,26 @@ pub fn resolve_jwt_claim_identity(
     Ok(CredentialIdentity::Derived { identity_fields, identity_hash })
 }
 
+/// The claim, and its value, a `from_jwt_claim` identity was derived from, read
+/// back from the identity fields [`resolve_jwt_claim_identity`] produced.
+/// `None` for an identity of any other kind.
+pub fn derived_jwt_claim(fields: &HashMap<String, JsonValue>) -> Option<(String, String)> {
+    if fields
+        .get("credential_type")?
+        .as_str()?
+        != "jwt_claim"
+    {
+        return None;
+    }
+    let claim = fields
+        .get("claim")?
+        .as_str()?;
+    let value = fields
+        .get("value")?
+        .as_str()?;
+    Some((claim.to_string(), value.to_string()))
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 /// Validate a DID string. Accepts `did:METHOD:method-specific-id` where
@@ -786,6 +806,18 @@ mod tests {
         );
         assert_eq!(fields.get("claim").unwrap(), &json!("oid"));
         assert_eq!(fields.get("value").unwrap(), &json!("11111111-2222-3333-4444-555555555555"));
+    }
+
+    #[test]
+    fn derived_jwt_claim_reads_back_the_claim_and_value_only_for_a_jwt_claim_identity() {
+        let claims = json!({ "azp": "assistant", "iss": "https://idp.example" });
+        let resolved = resolve_jwt_claim_identity("azp", &["iss".to_string()], &claims).unwrap();
+        let (_, fields) = derived_parts(&resolved);
+        assert_eq!(derived_jwt_claim(&fields), Some(("azp".to_string(), "assistant".to_string())));
+
+        let mut other = fields.clone();
+        other.insert("credential_type".to_string(), json!("api_key"));
+        assert_eq!(derived_jwt_claim(&other), None);
     }
 
     #[test]

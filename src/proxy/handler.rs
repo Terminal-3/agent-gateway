@@ -5043,6 +5043,9 @@ async fn proxy_handler_with_mcp_runtime(
     let request_agent_did = identity_result
         .as_ref()
         .map(|r| r.did.clone());
+    let request_agent_claim = identity_result
+        .as_ref()
+        .and_then(|r| crate::identity::credential_identity::derived_jwt_claim(&r.identity_fields));
     let request_user_id = source_auth_user_id(authenticated_identity.as_ref());
     let request_user_hash = source_auth_user_hash(authenticated_identity.as_ref(), &state.surface);
 
@@ -5517,6 +5520,9 @@ async fn proxy_handler_with_mcp_runtime(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
             connection_guard
@@ -5556,6 +5562,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
             }
@@ -5576,6 +5585,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -5616,6 +5628,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -5761,6 +5776,9 @@ async fn proxy_handler_with_mcp_runtime(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
             connection_guard
@@ -5807,6 +5825,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     policy_version: channel_opa_version,
                     policy_content_hash: channel_opa_hash.as_deref(),
                     ..Default::default()
@@ -5827,6 +5848,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     policy_version: channel_opa_version,
                     policy_content_hash: channel_opa_hash.as_deref(),
                     ..Default::default()
@@ -5863,6 +5887,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     policy_version: channel_opa_version,
                     policy_content_hash: channel_opa_hash.as_deref(),
                     ..Default::default()
@@ -5930,6 +5957,9 @@ async fn proxy_handler_with_mcp_runtime(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
             channel_warn!(config_id_str, "MCP tool gating blocked tools/call without a readable tool name");
@@ -5987,6 +6017,9 @@ async fn proxy_handler_with_mcp_runtime(
             path: Some(uri.path()),
             identity: authenticated_identity.as_ref(),
             actor_did: request_agent_did.as_deref(),
+            actor_claim: request_agent_claim
+                .as_ref()
+                .map(|(claim, value)| (claim.as_str(), value.as_str())),
             ..Default::default()
         });
 
@@ -8461,6 +8494,9 @@ async fn proxy_handler_with_mcp_runtime(
                                 path: Some(uri.path()),
                                 identity: authenticated_identity.as_ref(),
                                 actor_did: request_agent_did.as_deref(),
+                                actor_claim: request_agent_claim
+                                    .as_ref()
+                                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                                 ..Default::default()
                             },
                         );
@@ -8851,6 +8887,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -8881,6 +8920,9 @@ async fn proxy_handler_with_mcp_runtime(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
         }
@@ -11145,6 +11187,9 @@ async fn handle_fabric_request(
         let request_agent_did = identity_result
             .as_ref()
             .map(|r| r.did.clone());
+        let request_agent_claim = identity_result
+            .as_ref()
+            .and_then(|r| crate::identity::credential_identity::derived_jwt_claim(&r.identity_fields));
 
         let inbound_policy_def_id = state
             .surface
@@ -11166,6 +11211,9 @@ async fn handle_fabric_request(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
             connection_guard
@@ -11205,6 +11253,9 @@ async fn handle_fabric_request(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
             }
@@ -11225,6 +11276,9 @@ async fn handle_fabric_request(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -11265,6 +11319,9 @@ async fn handle_fabric_request(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard

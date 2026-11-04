@@ -40,6 +40,13 @@ pub fn identity_binding_vp_audit_enabled() -> bool {
     crate::audit::producer::producer().wants("vp_injected")
 }
 
+/// The JWT claim, and its value, a caller's agent DID was derived from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct AuditIdentityClaim {
+    pub claim: String,
+    pub value: String,
+}
+
 /// Caller context captured from source authentication
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AuditCallerContext {
@@ -64,6 +71,11 @@ pub struct AuditCallerContext {
     /// (`fabric_verified`): the value its delegated credentials are keyed by.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub user_identity_hash: Option<String>,
+    /// The claim the caller's agent DID was derived from, on a surface whose
+    /// inbound identity is `from_jwt_claim`. Lets the consumer of the record
+    /// map the DID to its own name for the agent.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub identity_claim: Option<AuditIdentityClaim>,
     /// The paired gateway that sent the request over Fabric, for a
     /// `fabric_verified` or `fabric_asserted` caller: its issuer DID, else its
     /// Remote gateway record id.
@@ -1118,6 +1130,7 @@ pub fn build_caller_context(identity: &crate::source_auth::AuthenticatedIdentity
                 .get("name")
                 .and_then(|v| v.as_str());
             AuditCallerContext {
+                identity_claim: None,
                 auth_method: "jwt_bearer".to_string(),
                 iss,
                 aud,
@@ -1136,6 +1149,7 @@ pub fn build_caller_context(identity: &crate::source_auth::AuthenticatedIdentity
             }
         }
         crate::source_auth::AuthenticatedIdentity::ApiKey { key_name, .. } => AuditCallerContext {
+            identity_claim: None,
             auth_method: "api_key".to_string(),
             iss: None,
             aud: None,
@@ -1153,6 +1167,7 @@ pub fn build_caller_context(identity: &crate::source_auth::AuthenticatedIdentity
             peer_gateway: None,
         },
         crate::source_auth::AuthenticatedIdentity::DidAuth { did } => AuditCallerContext {
+            identity_claim: None,
             auth_method: "did_auth".to_string(),
             iss: None,
             aud: None,
@@ -1177,6 +1192,7 @@ pub fn build_caller_context(identity: &crate::source_auth::AuthenticatedIdentity
             source,
             ..
         } => AuditCallerContext {
+            identity_claim: None,
             auth_method: "mtls".to_string(),
             iss: Some(issuer_dn.clone()),
             aud: None,
@@ -1230,6 +1246,7 @@ pub fn transit_caller_context(claims: &crate::proxy::transit_token::TransitToken
             .clone()
             .unwrap_or_else(|| fabric.peer_gateway_id.clone());
         return Some(AuditCallerContext {
+            identity_claim: None,
             auth_method: if verified {
                 "fabric_verified"
             } else {
@@ -1267,6 +1284,7 @@ pub fn transit_caller_context(claims: &crate::proxy::transit_token::TransitToken
         return None;
     }
     Some(AuditCallerContext {
+        identity_claim: None,
         auth_method: "transit_token".to_string(),
         iss: None,
         aud: None,
@@ -1309,6 +1327,7 @@ pub fn binding_caller_context(binding: &crate::surface_context::IdentityBindingC
         return None;
     }
     Some(AuditCallerContext {
+        identity_claim: None,
         auth_method: "workload_binding".to_string(),
         iss: Some(binding.gateway_did.clone()),
         aud: None,
@@ -1345,6 +1364,7 @@ pub fn management_caller_context(
         "session"
     };
     Some(AuditCallerContext {
+        identity_claim: None,
         auth_method: auth_method.to_string(),
         iss: None,
         aud: None,
