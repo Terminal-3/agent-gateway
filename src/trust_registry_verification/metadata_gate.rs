@@ -155,6 +155,8 @@ pub fn synthesize_metadata_gate_failures<'o>(
                     element_name: elem.name.as_deref(),
                     authority_id: None,
                     entity_id: None,
+                    action: Some(&result.action),
+                    resource: Some(&result.resource),
                     trust_registry_id: elem
                         .trust_registry_id
                         .as_str(),

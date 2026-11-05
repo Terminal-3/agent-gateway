@@ -1,8 +1,8 @@
 //! Observability utilities for monitoring and real-time updates
 
 pub mod caller_names;
+pub mod config_audit;
 pub mod dashboard;
-pub mod did_display;
 pub mod http_trace;
 pub mod identity_binding_audit;
 pub mod identity_view;

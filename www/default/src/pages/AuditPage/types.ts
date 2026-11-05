@@ -15,6 +15,7 @@ export interface PolicyDecisionData {
   policy_version?: number | null;
   /** `sha256:<hex>` content hash of the exact Rego enforced (attestation) — matches the SHA shown on the Policies list. */
   policy_content_hash?: string | null;
+  target_did?: string | null;
 }
 
 export interface TrustCheckData {
@@ -29,6 +30,8 @@ export interface TrustCheckData {
   authority_id?: string | null;
   /** Same absence semantics as `authority_id`. */
   entity_id?: string | null;
+  action?: string | null;
+  resource?: string | null;
   ok: boolean;
   error_code?: string | null;
 }

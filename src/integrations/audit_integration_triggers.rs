@@ -199,6 +199,8 @@ mod tests {
     fn policy_decision(decision: &str) -> DelegationAuditEvent {
         let mut event = audit_event(
             DelegationAuditAction::PolicyDecision {
+                target_did: None,
+                target_identity_claim: None,
                 scope: "surface".to_string(),
                 flow: "access_point".to_string(),
                 policy_id: "surface.policy".to_string(),
@@ -479,6 +481,7 @@ mod tests {
             | DelegationAuditAction::ElicitationTimedOut
             | DelegationAuditAction::PolicyDecision { .. }
             | DelegationAuditAction::TrustCheck { .. }
+            | DelegationAuditAction::ConfigObject { .. }
             | DelegationAuditAction::TraceTerminated { .. }
             | DelegationAuditAction::PaymentEvent(_)
             | DelegationAuditAction::AuthFailed { .. }
@@ -517,12 +520,19 @@ mod tests {
             DelegationAuditAction::ElicitationTimedOut,
             policy_decision("allow").event,
             DelegationAuditAction::TrustCheck {
+                action: None,
+                resource: None,
                 leg: "caller".to_string(),
                 authority_id: None,
                 entity_id: None,
                 ok: true,
                 error_code: None,
                 transit_point: None,
+            },
+            DelegationAuditAction::ConfigObject {
+                kind: "surface".to_string(),
+                id: "s".to_string(),
+                object: None,
             },
             DelegationAuditAction::TraceTerminated {
                 own_trace_id: "own".to_string(),

@@ -54,6 +54,11 @@ impl Producer {
         self.journal.write().take();
     }
 
+    /// Whether the producer is connected to a running journal.
+    pub fn is_connected(&self) -> bool {
+        self.journal.read().is_some()
+    }
+
     /// Whether any sink selects the event. One atomic read.
     pub fn wants(
         &self,

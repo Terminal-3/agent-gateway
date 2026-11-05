@@ -40,6 +40,12 @@ pub fn identity_binding_vp_audit_enabled() -> bool {
     crate::audit::producer::producer().wants("vp_injected")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct AuditIdentityClaim {
+    pub claim: String,
+    pub value: String,
+}
+
 /// Caller context captured from source authentication
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AuditCallerContext {
@@ -64,6 +70,8 @@ pub struct AuditCallerContext {
     /// (`fabric_verified`): the value its delegated credentials are keyed by.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub user_identity_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub identity_claim: Option<AuditIdentityClaim>,
     /// The paired gateway that sent the request over Fabric, for a
     /// `fabric_verified` or `fabric_asserted` caller: its issuer DID, else its
     /// Remote gateway record id.
@@ -445,6 +453,16 @@ pub enum DelegationAuditAction {
         /// sees (scope `mcp_tool_list`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         removed_tools: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_did: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_identity_claim: Option<AuditIdentityClaim>,
+    },
+    ConfigObject {
+        kind: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        object: Option<serde_json::Value>,
     },
     /// TRQP trust-check outcome. `authority_id` / `entity_id` are
     /// `Option<String>` and omitted from the JSONL on the target-leg
@@ -463,6 +481,10 @@ pub enum DelegationAuditAction {
         /// outside the outbound path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         transit_point: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
     },
     /// Trace terminated at this surface's egress. Records the own → downstream
     /// trace mapping so an operator can bridge the terminated trace from this
@@ -1108,6 +1130,7 @@ pub fn build_caller_context(identity: &crate::source_auth::AuthenticatedIdentity
                 .get("name")
                 .and_then(|v| v.as_str());
             AuditCallerContext {
+                identity_claim: None,
                 auth_method: "jwt_bearer".to_string(),
                 iss,
                 aud,
@@ -1126,6 +1149,7 @@ pub fn build_caller_context(identity: &crate::source_auth::AuthenticatedIdentity
             }
         }
         crate::source_auth::AuthenticatedIdentity::ApiKey { key_name, .. } => AuditCallerContext {
+            identity_claim: None,
             auth_method: "api_key".to_string(),
             iss: None,
             aud: None,
@@ -1143,6 +1167,7 @@ pub fn build_caller_context(identity: &crate::source_auth::AuthenticatedIdentity
             peer_gateway: None,
         },
         crate::source_auth::AuthenticatedIdentity::DidAuth { did } => AuditCallerContext {
+            identity_claim: None,
             auth_method: "did_auth".to_string(),
             iss: None,
             aud: None,
@@ -1167,6 +1192,7 @@ pub fn build_caller_context(identity: &crate::source_auth::AuthenticatedIdentity
             source,
             ..
         } => AuditCallerContext {
+            identity_claim: None,
             auth_method: "mtls".to_string(),
             iss: Some(issuer_dn.clone()),
             aud: None,
@@ -1220,6 +1246,7 @@ pub fn transit_caller_context(claims: &crate::proxy::transit_token::TransitToken
             .clone()
             .unwrap_or_else(|| fabric.peer_gateway_id.clone());
         return Some(AuditCallerContext {
+            identity_claim: None,
             auth_method: if verified {
                 "fabric_verified"
             } else {
@@ -1257,6 +1284,7 @@ pub fn transit_caller_context(claims: &crate::proxy::transit_token::TransitToken
         return None;
     }
     Some(AuditCallerContext {
+        identity_claim: None,
         auth_method: "transit_token".to_string(),
         iss: None,
         aud: None,
@@ -1299,6 +1327,7 @@ pub fn binding_caller_context(binding: &crate::surface_context::IdentityBindingC
         return None;
     }
     Some(AuditCallerContext {
+        identity_claim: None,
         auth_method: "workload_binding".to_string(),
         iss: Some(binding.gateway_did.clone()),
         aud: None,
@@ -1335,6 +1364,7 @@ pub fn management_caller_context(
         "session"
     };
     Some(AuditCallerContext {
+        identity_claim: None,
         auth_method: auth_method.to_string(),
         iss: None,
         aud: None,
@@ -1375,6 +1405,7 @@ pub fn action_category(action: &DelegationAuditAction) -> &'static str {
     match action {
         DelegationAuditAction::PolicyDecision { .. } => "policy_decision",
         DelegationAuditAction::TrustCheck { .. } => "trust_check",
+        DelegationAuditAction::ConfigObject { .. } => "config_object",
         DelegationAuditAction::TraceTerminated { .. } => "trace_terminated",
         DelegationAuditAction::ConsentGranted => "consent_granted",
         DelegationAuditAction::TokenInjected => "token_injected",
@@ -1582,6 +1613,9 @@ pub fn audit_policy_decision(
     policy_content_hash: Option<&str>,
     caller: Option<AuditCallerContext>,
     removed_tools: Option<&[String]>,
+    mcp_tool_name: Option<&str>,
+    target_did: Option<&str>,
+    target_claim: Option<(&str, &str)>,
 ) {
     emit("policy_decision", || DelegationAuditEvent {
         event_id: new_event_id(),
@@ -1605,6 +1639,11 @@ pub fn audit_policy_decision(
             policy_version,
             policy_content_hash: policy_content_hash.map(str::to_string),
             removed_tools: removed_tools.map(<[String]>::to_vec),
+            target_did: target_did.map(str::to_string),
+            target_identity_claim: target_claim.map(|(claim, value)| AuditIdentityClaim {
+                claim: claim.to_string(),
+                value: value.to_string(),
+            }),
         },
         agent_did: None,
         agent_identity_did: None,
@@ -1620,7 +1659,7 @@ pub fn audit_policy_decision(
         inject_as: None,
         via_fabric: false,
         caller,
-        mcp_tool_name: None,
+        mcp_tool_name: mcp_tool_name.map(str::to_string),
         vp_jwt: None,
         vp_fingerprint: None,
         trace_id: trace_id.map(str::to_string),
@@ -1637,6 +1676,43 @@ pub fn audit_policy_decision(
 /// `authority_id` / `entity_id` are `None` on the target-leg pre-check
 /// paths (`AGENT_CARD_UNAVAILABLE`, `TRUST_REGISTRY_METADATA_UNAVAILABLE`)
 /// so the emitted JSONL omits them, matching the wire shape.
+pub fn audit_config_object(
+    kind: &str,
+    id: &str,
+    object: Option<serde_json::Value>,
+) {
+    emit("config_object", || DelegationAuditEvent {
+        event_id: new_event_id(),
+        timestamp: Utc::now().to_rfc3339(),
+        event: DelegationAuditAction::ConfigObject {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            object,
+        },
+        agent_did: None,
+        agent_identity_did: None,
+        user_identity_hash: None,
+        provider_id: None,
+        provider_name: None,
+        surface_id: None,
+        channel_name: None,
+        target_endpoint: None,
+        protocol: None,
+        scopes: None,
+        token_id: None,
+        inject_as: None,
+        via_fabric: false,
+        caller: None,
+        mcp_tool_name: None,
+        vp_jwt: None,
+        vp_fingerprint: None,
+        trace_id: None,
+        request_id: None,
+        surface_variant: None,
+        detail: None,
+    });
+}
+
 pub fn audit_trust_check(
     surface_id: Option<&str>,
     transit_point: Option<&str>,
@@ -1646,6 +1722,8 @@ pub fn audit_trust_check(
     entity_id: Option<&str>,
     ok: bool,
     error_code: Option<&str>,
+    action: Option<&str>,
+    resource: Option<&str>,
 ) {
     emit("trust_check", || DelegationAuditEvent {
         event_id: new_event_id(),
@@ -1657,6 +1735,8 @@ pub fn audit_trust_check(
             ok,
             error_code: error_code.map(str::to_string),
             transit_point: transit_point.map(str::to_string),
+            action: action.map(str::to_string),
+            resource: resource.map(str::to_string),
         },
         agent_did: None,
         agent_identity_did: None,
@@ -2073,6 +2153,8 @@ mod tests {
         // The two variants that belong to the VP Audit Log (/v1/audit).
         assert!(
             DelegationAuditAction::PolicyDecision {
+                target_did: None,
+                target_identity_claim: None,
                 scope: "gateway".to_string(),
                 flow: "access_point".to_string(),
                 policy_id: "pol-1".to_string(),
@@ -2092,6 +2174,8 @@ mod tests {
         );
         assert!(
             DelegationAuditAction::TrustCheck {
+                action: None,
+                resource: None,
                 leg: "caller".to_string(),
                 authority_id: Some("did:example:auth".to_string()),
                 entity_id: Some("did:example:agent".to_string()),
@@ -2304,6 +2388,8 @@ mod tests {
             mk(DelegationAuditAction::ConsentGranted),
             mk(DelegationAuditAction::TokenInjected),
             mk(DelegationAuditAction::PolicyDecision {
+                target_did: None,
+                target_identity_claim: None,
                 scope: "gateway".to_string(),
                 flow: "access_point".to_string(),
                 policy_id: "pol-1".to_string(),
@@ -2398,6 +2484,8 @@ mod tests {
                 event_id: None,
                 timestamp: "2026-08-18T00:00:01Z".to_string(),
                 event: DelegationAuditAction::PolicyDecision {
+                    target_did: None,
+                    target_identity_claim: None,
                     scope: "surface".to_string(),
                     flow: "fabric".to_string(),
                     policy_id: "surface.policy".to_string(),
@@ -2477,6 +2565,9 @@ mod tests {
                     Some(3),
                     Some("sha256:abc"),
                     caller,
+                    None,
+                    None,
+                    None,
                     None,
                 )
             };
@@ -2765,6 +2856,8 @@ mod tests {
                 Some("did:e"),
                 true,
                 None,
+                None,
+                None,
             );
         })
         .await;
@@ -2790,6 +2883,8 @@ mod tests {
                 None,
                 false,
                 Some("AGENT_CARD_UNAVAILABLE"),
+                None,
+                None,
             );
         })
         .await;
@@ -2809,6 +2904,8 @@ mod tests {
     #[test]
     fn a_trust_check_record_without_a_transit_point_omits_it_and_still_reads() {
         let action = DelegationAuditAction::TrustCheck {
+            action: None,
+            resource: None,
             leg: "caller".to_string(),
             authority_id: None,
             entity_id: None,

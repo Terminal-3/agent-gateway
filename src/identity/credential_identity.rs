@@ -615,6 +615,23 @@ pub fn resolve_jwt_claim_identity(
     Ok(CredentialIdentity::Derived { identity_fields, identity_hash })
 }
 
+pub fn derived_jwt_claim(fields: &HashMap<String, JsonValue>) -> Option<(String, String)> {
+    if fields
+        .get("credential_type")?
+        .as_str()?
+        != "jwt_claim"
+    {
+        return None;
+    }
+    let claim = fields
+        .get("claim")?
+        .as_str()?;
+    let value = fields
+        .get("value")?
+        .as_str()?;
+    Some((claim.to_string(), value.to_string()))
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────
 
 /// Validate a DID string. Accepts `did:METHOD:method-specific-id` where

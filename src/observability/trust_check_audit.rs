@@ -112,6 +112,8 @@ pub struct TrustCheckAuditEvent<'a> {
     /// Resolved (or, on a pre-dispatch failure, templated) TRQP entity id.
     /// Same `None` semantics as `authority_id`.
     pub entity_id: Option<&'a str>,
+    pub action: Option<&'a str>,
+    pub resource: Option<&'a str>,
     pub trust_registry_id: &'a str,
     pub query_type: TrqpQueryType,
     pub ok: bool,
@@ -131,6 +133,8 @@ pub fn record_trust_check(event: TrustCheckAuditEvent<'_>) {
         element_name,
         authority_id,
         entity_id,
+        action,
+        resource,
         trust_registry_id,
         query_type,
         ok,
@@ -146,6 +150,8 @@ pub fn record_trust_check(event: TrustCheckAuditEvent<'_>) {
     let error_detail_str = error_detail.unwrap_or_default();
     let element_name_str = element_name.unwrap_or_default();
     let transit_point_str = transit_point.unwrap_or_default();
+    let action_str = action.unwrap_or_default();
+    let resource_str = resource.unwrap_or_default();
 
     let duration_secs = match (result, latency_ms) {
         (RESULT_ERROR, 0) => None,
@@ -165,6 +171,8 @@ pub fn record_trust_check(event: TrustCheckAuditEvent<'_>) {
             element_name = element_name_str,
             trust_registry_id = trust_registry_id,
             query_type = query_type_str,
+            action = action_str,
+            resource = resource_str,
             result = result,
             ok = ok,
             error_code = error_code_str,
@@ -182,6 +190,8 @@ pub fn record_trust_check(event: TrustCheckAuditEvent<'_>) {
             element_name = element_name_str,
             trust_registry_id = trust_registry_id,
             query_type = query_type_str,
+            action = action_str,
+            resource = resource_str,
             result = result,
             ok = ok,
             error_code = error_code_str,
@@ -206,16 +216,17 @@ pub fn record_trust_check(event: TrustCheckAuditEvent<'_>) {
     // "unavailable" pre-check paths) is forwarded verbatim so the JSONL
     // omits the field, matching the wire shape.
     if crate::audit::producer::producer().wants("trust_check") {
-        let (authority_display, entity_display) = redacted_ids_for_audit(authority_id, entity_id);
         crate::delegation_vault::audit::audit_trust_check(
             Some(surface_id),
             transit_point,
             crate::observability::policy_audit::current_span_trace_id().as_deref(),
             leg_str,
-            authority_display.as_deref(),
-            entity_display.as_deref(),
+            authority_id,
+            entity_id,
             ok,
             error_code,
+            action,
+            resource,
         );
     }
 }
@@ -224,16 +235,6 @@ pub fn record_trust_check(event: TrustCheckAuditEvent<'_>) {
 /// using the shared [`crate::observability::did_display::format_did`]
 /// (defaults `first = 8`, `last = 8`). `None` is preserved so the JSONL
 /// omits the field on the target-leg "unavailable" pre-check paths.
-fn redacted_ids_for_audit(
-    authority_id: Option<&str>,
-    entity_id: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    (
-        authority_id.map(|id| crate::observability::did_display::format_did(id, 8, 8)),
-        entity_id.map(|id| crate::observability::did_display::format_did(id, 8, 8)),
-    )
-}
-
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::sync::{Arc, Mutex};
@@ -388,6 +389,8 @@ mod tests {
 
     fn caller_check(surface_id: &'static str) -> TrustCheckAuditEvent<'static> {
         TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id,
             transit_point: None,
             leg: TrustCheckLeg::Caller,
@@ -444,6 +447,8 @@ mod tests {
     #[test]
     fn record_does_not_panic_on_any_path() {
         record_trust_check(TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id: "surf-1",
             transit_point: None,
             leg: TrustCheckLeg::Caller,
@@ -459,6 +464,8 @@ mod tests {
             latency_ms: 12,
         });
         record_trust_check(TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id: "surf-1",
             transit_point: None,
             leg: TrustCheckLeg::Target,
@@ -474,6 +481,8 @@ mod tests {
             latency_ms: 8,
         });
         record_trust_check(TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id: "surf-1",
             transit_point: None,
             leg: TrustCheckLeg::Caller,
@@ -498,6 +507,8 @@ mod tests {
         ok: bool,
     ) -> TrustCheckAuditEvent<'a> {
         TrustCheckAuditEvent {
+            action: None,
+            resource: None,
             surface_id,
             transit_point,
             leg: TrustCheckLeg::Target,
@@ -562,6 +573,8 @@ mod tests {
         let captured = capture(|| {
             crate::observability::policy_audit::with_request_variant("beta", || {
                 record_trust_check(TrustCheckAuditEvent {
+                    action: None,
+                    resource: None,
                     surface_id: "surface-a",
                     transit_point: None,
                     leg: TrustCheckLeg::Caller,
@@ -605,6 +618,8 @@ mod tests {
         // `result_label` routes it to `error` rather than `denied`.
         let captured = capture(|| {
             record_trust_check(TrustCheckAuditEvent {
+                action: None,
+                resource: None,
                 surface_id: "surface-b",
                 transit_point: None,
                 leg: TrustCheckLeg::Target,
@@ -643,6 +658,8 @@ mod tests {
     fn not_recognized_event_emits_at_warn_with_result_denied() {
         let captured = capture(|| {
             record_trust_check(TrustCheckAuditEvent {
+                action: None,
+                resource: None,
                 surface_id: "surface-nr",
                 transit_point: None,
                 leg: TrustCheckLeg::Caller,
@@ -674,6 +691,8 @@ mod tests {
     fn not_authorized_event_emits_at_warn_with_result_denied() {
         let captured = capture(|| {
             record_trust_check(TrustCheckAuditEvent {
+                action: None,
+                resource: None,
                 surface_id: "surface-na",
                 transit_point: None,
                 leg: TrustCheckLeg::Caller,
@@ -704,6 +723,8 @@ mod tests {
     fn error_event_emits_at_warn_with_error_code_and_zero_latency() {
         let captured = capture(|| {
             record_trust_check(TrustCheckAuditEvent {
+                action: None,
+                resource: None,
                 surface_id: "surface-c",
                 transit_point: None,
                 leg: TrustCheckLeg::Caller,
@@ -737,38 +758,5 @@ mod tests {
             "WARN event must carry the per-failure detail so operators can diagnose without DEBUG"
         );
         assert_eq!(field(ev, "latency_ms"), Some("0"));
-    }
-
-    #[test]
-    fn audit_truncates_authority_and_entity_ids() {
-        let (authority, entity) = redacted_ids_for_audit(
-            Some("did:web:agent-gateway-1.example.com:channel:1524042a-2339-4e08-af51-2c5fd43f7b7e"),
-            Some("did:key:aaaaaaaabbbbbbbbccccccccdddddddd"),
-        );
-        assert_eq!(authority.as_deref(), Some("did::channel:1524042a...d43f7b7e"));
-        assert_eq!(entity.as_deref(), Some("did:key:aaaaaaaa...dddddddd"));
-    }
-
-    #[test]
-    fn audit_passthrough_for_non_did_values() {
-        // Non-`did:` prefixed values (blank, URI-style, opaque) pass
-        // through unchanged. Blank `entity_id` is a permitted element
-        // config today; the truncator must not mangle it into anything
-        // else so Rego rules keying off `r.entity_id == ""` keep working
-        // and audit rows still show a blank cell.
-        let (authority, entity) = redacted_ids_for_audit(Some("https://example.com/authority"), Some(""));
-        assert_eq!(authority.as_deref(), Some("https://example.com/authority"));
-        assert_eq!(entity.as_deref(), Some(""));
-    }
-
-    #[test]
-    fn audit_omits_ids_when_none() {
-        // Target-leg pre-check paths (`AGENT_CARD_UNAVAILABLE`,
-        // `TRUST_REGISTRY_METADATA_UNAVAILABLE`) pass `None` so the
-        // JSONL audit sink omits the fields, matching the wire shape
-        // of `TrustCheckResult`.
-        let (authority, entity) = redacted_ids_for_audit(None, None);
-        assert!(authority.is_none());
-        assert!(entity.is_none());
     }
 }

@@ -233,6 +233,8 @@ async fn execute_one<C: TrqpClient + ?Sized>(
                 element_name: elem.name.as_deref(),
                 authority_id: Some(&elem.query.authority_id),
                 entity_id: Some(&elem.query.entity_id),
+                action: Some(&result.action),
+                resource: Some(&result.resource),
                 trust_registry_id: &elem.trust_registry_id,
                 query_type: elem.query_type,
                 ok: false,
@@ -316,6 +318,8 @@ async fn execute_one<C: TrqpClient + ?Sized>(
         element_name: elem.name.as_deref(),
         authority_id: Some(&resolved.authority_id),
         entity_id: Some(&resolved.entity_id),
+        action: Some(&result.action),
+        resource: Some(&result.resource),
         trust_registry_id: &elem.trust_registry_id,
         query_type: elem.query_type,
         ok: result.ok,
@@ -421,6 +425,7 @@ pub fn synthesize_unavailable_target<'o>(
     elements
         .iter()
         .map(|elem| {
+            let result = synthesize_failure(elem, code, detail.to_string());
             record_trust_check(TrustCheckAuditEvent {
                 surface_id: origin.surface_id,
                 transit_point: origin.transit_point,
@@ -429,6 +434,8 @@ pub fn synthesize_unavailable_target<'o>(
                 element_name: elem.name.as_deref(),
                 authority_id: None,
                 entity_id: None,
+                action: Some(&result.action),
+                resource: Some(&result.resource),
                 trust_registry_id: &elem.trust_registry_id,
                 query_type: elem.query_type,
                 ok: false,
@@ -436,7 +443,7 @@ pub fn synthesize_unavailable_target<'o>(
                 error_detail: Some(detail),
                 latency_ms: 0,
             });
-            synthesize_failure(elem, code, detail.to_string())
+            result
         })
         .collect()
 }

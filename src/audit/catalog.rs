@@ -78,6 +78,12 @@ pub const AUDIT_EVENTS: &[AuditEventSpec] = &[
         Policies,
     ),
     event("trust_check", "Trust Check", "A TRQP trust-check outcome for the caller or target leg", Trust),
+    event(
+        "config_object",
+        "Config Object",
+        "A surface, policy or trust registry as configured, at start and on each change",
+        Policies,
+    ),
     event("trace_terminated", "Trace Terminated", "A surface terminated the end-to-end trace at its egress", Trace),
     event(
         "vp_injected",

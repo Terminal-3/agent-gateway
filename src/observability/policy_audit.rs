@@ -379,10 +379,17 @@ fn caller_fields(identity: &AuthenticatedIdentity) -> (&'static str, String, Opt
 /// The caller a decision is attributed to in the VP Audit Log: the leg's own
 /// authenticated identity, else the caller context carried onto it.
 fn decision_caller(event: &PolicyDecisionEvent<'_>) -> Option<crate::delegation_vault::audit::AuditCallerContext> {
-    event
+    let mut caller = event
         .identity
         .map(crate::delegation_vault::audit::build_caller_context)
-        .or_else(|| event.caller.cloned())
+        .or_else(|| event.caller.cloned())?;
+    if let Some((claim, value)) = event.actor_claim {
+        caller.identity_claim = Some(crate::delegation_vault::audit::AuditIdentityClaim {
+            claim: claim.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Some(caller)
 }
 
 /// Why a policy could not reach a decision. The request is denied (fail
@@ -450,6 +457,7 @@ pub struct PolicyDecisionEvent<'a> {
     pub caller: Option<&'a crate::delegation_vault::audit::AuditCallerContext>,
     /// Resolved/derived agent DID for the request, when available.
     pub actor_did: Option<&'a str>,
+    pub actor_claim: Option<(&'a str, &'a str)>,
     /// Identifier (or DID) of the gateway making the decision.
     pub gateway_did: Option<&'a str>,
     /// Which request flow produced the decision (access point / transit point /
@@ -460,6 +468,9 @@ pub struct PolicyDecisionEvent<'a> {
     pub policy_version: Option<u32>,
     /// `sha256:<hex>` content hash of the exact Rego enforced (attestation).
     pub policy_content_hash: Option<&'a str>,
+    pub mcp_tool_name: Option<&'a str>,
+    pub target_did: Option<&'a str>,
+    pub target_claim: Option<(&'a str, &'a str)>,
 }
 
 /// Emit one structured event describing a policy decision.
@@ -577,6 +588,12 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
         .unwrap_or_default();
     let policy_name = decision_policy_name(&event);
     let surface_variant = current_request_variant();
+    let mcp_tool_name = event
+        .mcp_tool_name
+        .unwrap_or_default();
+    let target_did = event
+        .target_did
+        .unwrap_or_default();
 
     if allowed {
         tracing::debug!(
@@ -599,6 +616,8 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             trace_id = trace_id,
             policy_version = policy_version_str.as_str(),
             policy_content_hash = policy_content_hash,
+            mcp_tool_name = mcp_tool_name,
+            target_did = target_did,
             "policy decision: allow"
         );
     } else {
@@ -622,6 +641,8 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             trace_id = trace_id,
             policy_version = policy_version_str.as_str(),
             policy_content_hash = policy_content_hash,
+            mcp_tool_name = mcp_tool_name,
+            target_did = target_did,
             "policy decision: {decision}"
         );
     }
@@ -669,6 +690,13 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             event.policy_content_hash,
             decision_caller(&event),
             event.removed_tools,
+            event
+                .mcp_tool_name
+                .filter(|name| !name.is_empty()),
+            event
+                .target_did
+                .filter(|did| !did.is_empty()),
+            event.target_claim,
         );
     }
 
@@ -969,6 +997,7 @@ mod tests {
             claims: serde_json::json!({"email": "ada@example.com"}),
         };
         let carried = crate::delegation_vault::audit::AuditCallerContext {
+            identity_claim: None,
             auth_method: "transit_token".to_string(),
             iss: None,
             aud: None,
@@ -1166,6 +1195,10 @@ mod tests {
             };
             with_request_variant("beta", || {
                 record_policy_decision(PolicyDecisionEvent {
+                    target_did: None,
+                    actor_claim: None,
+                    mcp_tool_name: None,
+                    target_claim: None,
                     scope: PolicyScope::Surface,
                     allow: false,
                     reason: Some("trust check failed"),
@@ -1401,6 +1434,8 @@ mod tests {
     #[test]
     fn a_decision_without_removed_tools_omits_the_field() {
         let event = crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision {
+            target_did: None,
+            target_identity_claim: None,
             scope: "surface".to_string(),
             flow: "access_point".to_string(),
             policy_id: "surface.policy".to_string(),

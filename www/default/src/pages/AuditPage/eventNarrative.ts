@@ -18,6 +18,7 @@ import {
 } from './auditHelpers';
 import type { AuditEntry, PolicyChangeActor, PolicyChangeData, PolicyChangeEvent } from './types';
 import { isBaseSurfaceVariant, surfaceVariantPhrase } from '../../utils/surfaceVariant';
+import { formatDID } from '../../utils/stringUtils';
 
 export type EventTone = 'allow' | 'deny' | 'warn' | 'neutral';
 
@@ -302,7 +303,7 @@ export function describeEntry(entry: AuditEntry, userName?: UserNameResolver): E
     // back to a plain phrasing that doesn't invent noise strings.
     const summary =
       tc.authority_id && tc.entity_id
-        ? `The ${tc.leg} leg verified ${tc.entity_id} against ${tc.authority_id}.`
+        ? `The ${tc.leg} leg verified ${formatDID(tc.entity_id)} against ${formatDID(tc.authority_id)}.`
         : `The ${tc.leg} leg trust check could not be evaluated.`;
     return {
       title: tc.ok ? 'Trust check passed' : 'Trust check failed',

@@ -3705,6 +3705,9 @@ async fn proxy_handler_with_mcp_runtime(
 
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         allow,
                         reason,
                         policy_id: outcome
@@ -3752,6 +3755,9 @@ async fn proxy_handler_with_mcp_runtime(
                     error!(channel = channel_name, error = %e, "Failed to evaluate MCP tool policy before fabric forwarding");
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         error: Some(crate::observability::PolicyEvaluationError::EvaluationError),
                         surface_id: Some(config_id),
                         surface_name: Some(state.surface.name.as_str()),
@@ -4532,6 +4538,9 @@ async fn proxy_handler_with_mcp_runtime(
                 Ok(outcome) if outcome.allow => {
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         allow: true,
                         surface_id: Some(config_id),
                         surface_name: Some(state.surface.name.as_str()),
@@ -4545,6 +4554,9 @@ async fn proxy_handler_with_mcp_runtime(
                 Ok(outcome) => {
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         allow: false,
                         reason: outcome.reason.as_deref(),
                         policy_id: outcome
@@ -4623,6 +4635,9 @@ async fn proxy_handler_with_mcp_runtime(
                     error!(channel = channel_name, error = %e, "Failed to evaluate MCP tool policy");
                     crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                         scope: crate::observability::PolicyScope::McpTool,
+                        mcp_tool_name: mcp_context
+                            .as_ref()
+                            .and_then(crate::surface_context::McpContext::called_tool_name),
                         error: Some(crate::observability::PolicyEvaluationError::EvaluationError),
                         surface_id: Some(config_id),
                         surface_name: Some(state.surface.name.as_str()),
@@ -5028,6 +5043,10 @@ async fn proxy_handler_with_mcp_runtime(
     let request_agent_did = identity_result
         .as_ref()
         .map(|r| r.did.clone());
+    let request_agent_claim = identity_result
+        .as_ref()
+        .filter(|r| matches!(r.verification, crate::surface_context::IdentityVerification::SourceAuth))
+        .and_then(|r| crate::identity::credential_identity::derived_jwt_claim(&r.identity_fields));
     let request_user_id = source_auth_user_id(authenticated_identity.as_ref());
     let request_user_hash = source_auth_user_hash(authenticated_identity.as_ref(), &state.surface);
 
@@ -5502,6 +5521,9 @@ async fn proxy_handler_with_mcp_runtime(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
             connection_guard
@@ -5541,6 +5563,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
             }
@@ -5561,6 +5586,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -5601,6 +5629,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -5746,6 +5777,9 @@ async fn proxy_handler_with_mcp_runtime(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
             connection_guard
@@ -5792,6 +5826,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     policy_version: channel_opa_version,
                     policy_content_hash: channel_opa_hash.as_deref(),
                     ..Default::default()
@@ -5812,6 +5849,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     policy_version: channel_opa_version,
                     policy_content_hash: channel_opa_hash.as_deref(),
                     ..Default::default()
@@ -5848,6 +5888,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     policy_version: channel_opa_version,
                     policy_content_hash: channel_opa_hash.as_deref(),
                     ..Default::default()
@@ -5915,6 +5958,9 @@ async fn proxy_handler_with_mcp_runtime(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
             channel_warn!(config_id_str, "MCP tool gating blocked tools/call without a readable tool name");
@@ -5957,6 +6003,7 @@ async fn proxy_handler_with_mcp_runtime(
 
         crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
             scope: crate::observability::PolicyScope::McpTool,
+            mcp_tool_name: Some(tool_name),
             allow: allowed,
             reason: if allowed {
                 None
@@ -5971,6 +6018,9 @@ async fn proxy_handler_with_mcp_runtime(
             path: Some(uri.path()),
             identity: authenticated_identity.as_ref(),
             actor_did: request_agent_did.as_deref(),
+            actor_claim: request_agent_claim
+                .as_ref()
+                .map(|(claim, value)| (claim.as_str(), value.as_str())),
             ..Default::default()
         });
 
@@ -8445,6 +8495,9 @@ async fn proxy_handler_with_mcp_runtime(
                                 path: Some(uri.path()),
                                 identity: authenticated_identity.as_ref(),
                                 actor_did: request_agent_did.as_deref(),
+                                actor_claim: request_agent_claim
+                                    .as_ref()
+                                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                                 ..Default::default()
                             },
                         );
@@ -8835,6 +8888,9 @@ async fn proxy_handler_with_mcp_runtime(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -8865,6 +8921,9 @@ async fn proxy_handler_with_mcp_runtime(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
         }
@@ -11129,6 +11188,10 @@ async fn handle_fabric_request(
         let request_agent_did = identity_result
             .as_ref()
             .map(|r| r.did.clone());
+        let request_agent_claim = identity_result
+            .as_ref()
+            .filter(|r| matches!(r.verification, crate::surface_context::IdentityVerification::SourceAuth))
+            .and_then(|r| crate::identity::credential_identity::derived_jwt_claim(&r.identity_fields));
 
         let inbound_policy_def_id = state
             .surface
@@ -11150,6 +11213,9 @@ async fn handle_fabric_request(
                 path: Some(uri.path()),
                 identity: authenticated_identity.as_ref(),
                 actor_did: request_agent_did.as_deref(),
+                actor_claim: request_agent_claim
+                    .as_ref()
+                    .map(|(claim, value)| (claim.as_str(), value.as_str())),
                 ..Default::default()
             });
             connection_guard
@@ -11189,6 +11255,9 @@ async fn handle_fabric_request(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
             }
@@ -11209,6 +11278,9 @@ async fn handle_fabric_request(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -11249,6 +11321,9 @@ async fn handle_fabric_request(
                     path: Some(uri.path()),
                     identity: authenticated_identity.as_ref(),
                     actor_did: request_agent_did.as_deref(),
+                    actor_claim: request_agent_claim
+                        .as_ref()
+                        .map(|(claim, value)| (claim.as_str(), value.as_str())),
                     ..Default::default()
                 });
                 connection_guard
@@ -11595,6 +11670,7 @@ async fn handle_fabric_request(
         let allowed = gating.is_tool_call_allowed(tool_name, &input_value);
         crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
             scope: crate::observability::PolicyScope::McpTool,
+            mcp_tool_name: Some(tool_name),
             allow: allowed,
             reason: if allowed {
                 None
@@ -15381,6 +15457,7 @@ async fn handle_mcp_proxy_request(
             Ok(outcome) if outcome.allow => {
                 crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                     scope: crate::observability::PolicyScope::McpTool,
+                    mcp_tool_name: mcp_context.and_then(crate::surface_context::McpContext::called_tool_name),
                     allow: true,
                     surface_id: Some(config_id),
                     surface_name: Some(state.surface.name.as_str()),
@@ -15394,6 +15471,7 @@ async fn handle_mcp_proxy_request(
             Ok(outcome) => {
                 crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                     scope: crate::observability::PolicyScope::McpTool,
+                    mcp_tool_name: mcp_context.and_then(crate::surface_context::McpContext::called_tool_name),
                     allow: false,
                     reason: outcome.reason.as_deref(),
                     policy_id: outcome
@@ -15433,6 +15511,7 @@ async fn handle_mcp_proxy_request(
                 error!(channel = channel_name, error = %e, "Failed to evaluate MCP tool policy");
                 crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
                     scope: crate::observability::PolicyScope::McpTool,
+                    mcp_tool_name: mcp_context.and_then(crate::surface_context::McpContext::called_tool_name),
                     error: Some(crate::observability::PolicyEvaluationError::EvaluationError),
                     surface_id: Some(config_id),
                     surface_name: Some(state.surface.name.as_str()),
@@ -15467,13 +15546,14 @@ async fn handle_mcp_proxy_request(
     {
         // Fail closed: an unreadable tool name can't be checked against the
         // gates. Checking `""` instead would pass a deny-pattern gate.
-        let tool_name = json_request
+        let called_tool = json_request
             .pointer("/params/name")
             .and_then(|n| n.as_str());
-        let allowed = tool_name.is_some_and(|tool_name| gating.is_tool_call_allowed(tool_name, input));
-        let tool_name = tool_name.unwrap_or_default();
+        let allowed = called_tool.is_some_and(|tool_name| gating.is_tool_call_allowed(tool_name, input));
+        let tool_name = called_tool.unwrap_or_default();
         crate::observability::record_policy_decision(crate::observability::PolicyDecisionEvent {
             scope: crate::observability::PolicyScope::McpTool,
+            mcp_tool_name: called_tool,
             allow: allowed,
             reason: if allowed {
                 None
