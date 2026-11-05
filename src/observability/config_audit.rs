@@ -23,7 +23,14 @@ pub fn spawn(stores: ConfigStores) {
     tokio::spawn(async move {
         let mut sent: HashMap<(&'static str, String), String> = HashMap::new();
         loop {
-            if let Some(objects) = collect(&stores).await {
+            // A record made while no sink takes it, or before the journal runs
+            // (Standby, startup), is dropped: send the whole snapshot again
+            // once it can be kept.
+            let ready = crate::audit::producer::producer().is_connected()
+                && crate::delegation_vault::audit::wants("config_object");
+            if !ready {
+                sent.clear();
+            } else if let Some(objects) = collect(&stores).await {
                 for (key, hash) in changes(&mut sent, &objects) {
                     crate::delegation_vault::audit::audit_config_object(
                         key.0,
@@ -45,7 +52,7 @@ async fn collect(stores: &ConfigStores) -> Option<HashMap<(&'static str, String)
         }
     }
     if let Some(store) = &stores.policies {
-        for policy in store.list().await {
+        for policy in store.try_list().await? {
             let object = json!({
                 "name": policy.name,
                 "description": policy.description,

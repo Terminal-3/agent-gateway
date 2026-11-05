@@ -5045,6 +5045,7 @@ async fn proxy_handler_with_mcp_runtime(
         .map(|r| r.did.clone());
     let request_agent_claim = identity_result
         .as_ref()
+        .filter(|r| matches!(r.verification, crate::surface_context::IdentityVerification::SourceAuth))
         .and_then(|r| crate::identity::credential_identity::derived_jwt_claim(&r.identity_fields));
     let request_user_id = source_auth_user_id(authenticated_identity.as_ref());
     let request_user_hash = source_auth_user_hash(authenticated_identity.as_ref(), &state.surface);
@@ -11189,6 +11190,7 @@ async fn handle_fabric_request(
             .map(|r| r.did.clone());
         let request_agent_claim = identity_result
             .as_ref()
+            .filter(|r| matches!(r.verification, crate::surface_context::IdentityVerification::SourceAuth))
             .and_then(|r| crate::identity::credential_identity::derived_jwt_claim(&r.identity_fields));
 
         let inbound_policy_def_id = state
