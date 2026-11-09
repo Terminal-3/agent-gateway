@@ -317,6 +317,9 @@ pub struct PolicyDocument {
     /// ISO 8601 last-updated timestamp (document metadata or new version).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// Admin who made the change `updated_at` records, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>,
     /// Append-only revision history (never mutated post-creation).
     pub versions: Vec<PolicyVersion>,
     /// Saved sample input for the policy dry-run (document-level; not versioned).
@@ -531,6 +534,7 @@ impl FileSystemPolicyDefinitionStore {
             .ok_or_else(|| anyhow::anyhow!("Policy definition not found: {}", id))?;
         document.tenant_id = tenant_id;
         document.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        document.updated_by = None;
         self.storage
             .save(&document)
             .await?;
@@ -581,15 +585,23 @@ impl FileSystemPolicyDefinitionStore {
             Some(mut existing) => {
                 let name = policy.name;
                 let description = policy.description;
+                let unchanged = existing
+                    .current()
+                    .is_some_and(|v| v.content_hash == hash);
+                let metadata_unchanged = existing.name == name
+                    && existing.description == description
+                    && existing.policy_type == policy.policy_type
+                    && existing.enabled == policy.enabled
+                    && existing.sample_input == policy.sample_input;
+                if !(unchanged && metadata_unchanged) {
+                    existing.updated_at = Some(now.clone());
+                    existing.updated_by = author.clone();
+                }
                 existing.name = name.clone();
                 existing.description = description.clone();
                 existing.policy_type = policy.policy_type;
                 existing.enabled = policy.enabled;
                 existing.sample_input = policy.sample_input;
-                existing.updated_at = Some(now.clone());
-                let unchanged = existing
-                    .current()
-                    .is_some_and(|v| v.content_hash == hash);
                 if unchanged {
                     // Metadata-only edit: keep the current revision's name /
                     // description snapshot in sync; older revisions stay frozen.
@@ -637,6 +649,7 @@ impl FileSystemPolicyDefinitionStore {
                     current_version: 1,
                     created_at,
                     updated_at: Some(now.clone()),
+                    updated_by: author.clone(),
                     versions: vec![PolicyVersion {
                         version: 1,
                         policy: policy.policy,
@@ -690,6 +703,7 @@ impl FileSystemPolicyDefinitionStore {
                     entry.content_hash = new_hash;
                 }
                 doc.updated_at = Some(chrono::Utc::now().to_rfc3339());
+                doc.updated_by = None;
                 self.storage
                     .save(&doc)
                     .await?;

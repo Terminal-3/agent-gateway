@@ -1058,6 +1058,7 @@ mod simulate_tests {
             current_version: 1,
             created_at: "t".into(),
             updated_at: None,
+            updated_by: None,
             versions: vec![PolicyVersion {
                 version: 1,
                 policy: rego.into(),

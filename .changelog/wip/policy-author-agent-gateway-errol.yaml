@@ -2,14 +2,21 @@ branch: policy-author-agent-gateway-errol
 changes:
   added:
     - timestamp: '2026-11-09T00:00:00Z'
-      title: Name each policy's current version author and time in its config audit record
+      title: Name who last changed each policy, and its version's author, in config audit
       description: >-
-        A policy's `config_object` audit record carries the policy's `created_at`, plus
-        `version_created_by` and `version_created_at` for the version the gateway enforces.
-        `version_created_by` is left out when the version has no recorded author, as with a
-        policy loaded from a legacy file. A rename or description edit keeps the version and
-        its author; a save that changes nothing sends no new record.
-  changed: []
+        A policy's `config_object` audit record carries `created_at`, `updated_at` and
+        `updated_by` (the last change of any kind, such as a rename, and the admin who made
+        it), plus `version_created_by` and `version_created_at` for the version the gateway
+        enforces. A policy records `updated_by` on every save that changes it. Authors are
+        left out when unknown, as with a policy loaded from a legacy file.
+  changed:
+    - timestamp: '2026-11-09T00:00:00Z'
+      title: Leave a policy's last-changed time alone on a save that changes nothing
+      description: >-
+        Saving a policy without changing its Rego, name, description, type, enabled state or
+        sample input no longer moves its `updated_at`, so it sends no new config audit record.
+        An ownership change or the legacy package migration clears `updated_by`, since neither
+        records an admin.
   fixed: []
   removed: []
   security: []

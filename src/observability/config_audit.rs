@@ -121,10 +121,10 @@ fn full_config(
         .collect()
 }
 
-/// The audited view of a policy: its current version, the document's creation
-/// time, and the current version's author and time. An absent author is left
-/// out. Every field is part of the policy itself, so a save that changes
-/// nothing leaves the object, and so the audit, unchanged.
+/// The audited view of a policy: its current version, when it was created and
+/// last changed and by whom, and the current version's author and time.
+/// Absent times and authors are left out. A save that changes nothing leaves
+/// the object, and so the audit, unchanged.
 fn policy_object(document: &PolicyDocument) -> Value {
     let policy = document.to_definition();
     let current = document.current();
@@ -139,6 +139,8 @@ fn policy_object(document: &PolicyDocument) -> Value {
         "created_at": policy.created_at,
     });
     let optional = [
+        ("updated_at", document.updated_at.clone()),
+        ("updated_by", document.updated_by.clone()),
         ("version_created_by", current.and_then(|v| v.created_by.clone())),
         ("version_created_at", current.map(|v| v.created_at.clone())),
     ];
@@ -218,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_object_carries_the_current_version_author_and_time() {
+    async fn policy_object_names_the_last_change_and_the_current_version() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp
             .path()
@@ -244,8 +246,9 @@ mod tests {
         let before = policy_object(&before[0]);
         assert_eq!(before["version"], 2);
         assert_eq!(before["version_created_by"], "bob");
+        assert_eq!(before["updated_by"], "bob");
 
-        // A rename keeps the version, so the author and time stay bob's.
+        // A rename is a change by carol that keeps bob's version.
         let rename = renamed(v2, "Deny all");
         store
             .save_authored(rename.clone(), Some("carol".into()), None)
@@ -266,7 +269,12 @@ mod tests {
         assert_eq!(object["version_created_at"], before["version_created_at"]);
         assert_eq!(object["version_created_at"], current.created_at.as_str());
         assert_eq!(object["created_at"], document.created_at.as_str());
-        assert!(object.get("updated_at").is_none());
+        assert_eq!(object["updated_by"], "carol");
+        assert_ne!(object["updated_at"], before["updated_at"]);
+        assert_eq!(
+            object["updated_at"],
+            document.updated_at.as_deref().expect("updated_at")
+        );
 
         // A save that changes nothing leaves the object as it was.
         store
@@ -295,6 +303,7 @@ mod tests {
 
         let object = policy_object(&document);
         assert!(object.get("version_created_by").is_none());
+        assert!(object.get("updated_by").is_none());
         assert_eq!(object["version_created_at"], "2026-01-01T00:00:00Z");
         assert_eq!(object["created_at"], "2026-01-01T00:00:00Z");
     }
