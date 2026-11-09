@@ -504,19 +504,12 @@ impl FileSystemPolicyDefinitionStore {
             .collect()
     }
 
-    /// Like [`Self::list`], `None` when the storage cannot be listed.
-    pub async fn try_list(&self) -> Option<Vec<PolicyDefinition>> {
-        let documents = self
-            .storage
+    /// Like [`Self::list_documents`], `None` when the storage cannot be listed.
+    pub async fn try_list_documents(&self) -> Option<Vec<PolicyDocument>> {
+        self.storage
             .list_all()
             .await
-            .ok()?;
-        Some(
-            documents
-                .iter()
-                .map(PolicyDocument::to_definition)
-                .collect(),
-        )
+            .ok()
     }
 
     /// List all versioned documents.

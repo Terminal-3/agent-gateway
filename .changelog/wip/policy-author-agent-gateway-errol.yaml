@@ -1,0 +1,16 @@
+branch: policy-author-agent-gateway-errol
+changes:
+  added:
+    - timestamp: '2026-11-09T00:00:00Z'
+      title: Name each policy's current version author and time in its config audit record
+      description: >-
+        A policy's `config_object` audit record carries the policy's `created_at`, plus
+        `version_created_by` and `version_created_at` for the version the gateway enforces.
+        `version_created_by` is left out when the version has no recorded author, as with a
+        policy loaded from a legacy file. A rename or description edit keeps the version and
+        its author; a save that changes nothing sends no new record.
+  changed: []
+  fixed: []
+  removed: []
+  security: []
+  breaking: []
