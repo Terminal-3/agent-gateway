@@ -160,7 +160,7 @@ pub async fn get_policy_definition(
 /// Resolve the authenticated caller to a human-readable username for the policy
 /// version author, falling back to the raw user id when it can't be resolved
 /// (unknown user, or no passkey store on this route).
-async fn resolve_author(
+pub(crate) async fn resolve_author(
     caller: Option<Extension<AuthGuardOk>>,
     passkey_storage: Option<Extension<std::sync::Arc<PasskeyStorage>>>,
 ) -> Option<String> {
@@ -298,10 +298,12 @@ pub async fn update_policy_definition(
             error!("Failed to update policy definition: {}", e);
             AppError::InternalError(format!("Failed to update policy definition: {}", e))
         })?;
-    if let Some(updated) = store
+    let saved = store
         .get(&policy_id)
-        .await
-        .and_then(|after| policy_changes::definition_updated(&existing, &after, PolicyChangeSource::Api))
+        .await;
+    if let Some(updated) = saved
+        .as_ref()
+        .and_then(|after| policy_changes::definition_updated(&existing, after, PolicyChangeSource::Api))
     {
         policy_changes::record(PolicyChangeAction::PolicyUpdated, updated);
     }
@@ -403,7 +405,7 @@ pub async fn update_policy_definition(
         .ws_state
         .broadcast(crate::server::WsUpdate::RefreshDashboard);
 
-    Ok(Json(response))
+    Ok(Json(saved.unwrap_or(response)))
 }
 
 /// Delete a policy definition

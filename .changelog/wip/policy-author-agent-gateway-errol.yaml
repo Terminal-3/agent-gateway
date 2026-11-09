@@ -15,8 +15,13 @@ changes:
       description: >-
         Saving a policy without changing its Rego, name, description, type, enabled state or
         sample input no longer moves its `updated_at`, so it sends no new config audit record.
-        An ownership change or the legacy package migration clears `updated_by`, since neither
-        records an admin.
+        An ownership change records its admin as `updated_by`; the legacy package migration
+        clears it, since no admin makes that change.
+    - timestamp: '2026-11-09T00:00:00Z'
+      title: Return the stored policy from a policy definition update
+      description: >-
+        `PUT /v1/policy-definitions/{policy_id}` answers with the policy as stored, so its
+        `updated_at`, `version` and `content_hash` match a later read.
   fixed: []
   removed: []
   security: []

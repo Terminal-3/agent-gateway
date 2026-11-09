@@ -527,6 +527,7 @@ impl FileSystemPolicyDefinitionStore {
         &self,
         id: &str,
         tenant_id: Option<String>,
+        author: Option<String>,
     ) -> Result<PolicyDefinition> {
         let mut document = self
             .get_document(id)
@@ -534,7 +535,7 @@ impl FileSystemPolicyDefinitionStore {
             .ok_or_else(|| anyhow::anyhow!("Policy definition not found: {}", id))?;
         document.tenant_id = tenant_id;
         document.updated_at = Some(chrono::Utc::now().to_rfc3339());
-        document.updated_by = None;
+        document.updated_by = author;
         self.storage
             .save(&document)
             .await?;

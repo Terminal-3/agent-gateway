@@ -288,6 +288,33 @@ mod tests {
         assert_eq!(policy_object(&documents[0]), object);
     }
 
+    #[tokio::test]
+    async fn policy_object_names_who_changed_the_owner() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp
+            .path()
+            .to_string_lossy()
+            .into_owned();
+        let store = FileSystemPolicyDefinitionStore::new(root)
+            .await
+            .expect("store");
+        store
+            .save_authored(definition("package gateway.policy"), Some("alice".into()), None)
+            .await
+            .expect("v1");
+        store
+            .set_tenant_id("p1", Some("tenant-a".into()), Some("erin".into()))
+            .await
+            .expect("owner");
+        let documents = store
+            .try_list_documents()
+            .await
+            .expect("list");
+        let object = policy_object(&documents[0]);
+        assert_eq!(object["updated_by"], "erin");
+        assert_eq!(object["version_created_by"], "alice");
+    }
+
     #[test]
     fn policy_object_omits_the_author_of_a_legacy_policy() {
         let mut value = json!({
