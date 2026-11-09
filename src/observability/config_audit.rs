@@ -63,7 +63,10 @@ async fn collect(stores: &ConfigStores) -> Option<HashMap<(&'static str, String)
         }
     }
     if let Some(store) = &stores.policies {
-        for document in store.try_list_documents().await? {
+        for document in store
+            .try_list_documents()
+            .await?
+        {
             objects.insert(("policy", document.id.clone()), policy_object(&document));
         }
     }
@@ -212,7 +215,10 @@ mod tests {
         }
     }
 
-    fn renamed(definition: PolicyDefinition, name: &str) -> PolicyDefinition {
+    fn renamed(
+        definition: PolicyDefinition,
+        name: &str,
+    ) -> PolicyDefinition {
         PolicyDefinition {
             name: name.into(),
             ..definition
@@ -273,7 +279,10 @@ mod tests {
         assert_ne!(object["updated_at"], before["updated_at"]);
         assert_eq!(
             object["updated_at"],
-            document.updated_at.as_deref().expect("updated_at")
+            document
+                .updated_at
+                .as_deref()
+                .expect("updated_at")
         );
 
         // A save that changes nothing leaves the object as it was.
@@ -329,8 +338,16 @@ mod tests {
         let document: PolicyDocument = serde_json::from_value(value).expect("document");
 
         let object = policy_object(&document);
-        assert!(object.get("version_created_by").is_none());
-        assert!(object.get("updated_by").is_none());
+        assert!(
+            object
+                .get("version_created_by")
+                .is_none()
+        );
+        assert!(
+            object
+                .get("updated_by")
+                .is_none()
+        );
         assert_eq!(object["version_created_at"], "2026-01-01T00:00:00Z");
         assert_eq!(object["created_at"], "2026-01-01T00:00:00Z");
     }
