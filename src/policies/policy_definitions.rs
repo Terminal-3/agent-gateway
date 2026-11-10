@@ -927,7 +927,12 @@ mod tests {
             .set_tenant_id("id", Some("tenant-a".into()))
             .await
             .expect("new owner");
-        assert_eq!(reassigned.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(
+            reassigned
+                .tenant_id
+                .as_deref(),
+            Some("tenant-a")
+        );
         assert_ne!(reassigned.updated_at, stamped);
         assert_eq!(doc.name, "renamed");
         assert_eq!(
