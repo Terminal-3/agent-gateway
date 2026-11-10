@@ -22,6 +22,9 @@ pub struct ConfigStores {
 pub fn spawn(stores: ConfigStores) {
     tokio::spawn(async move {
         let mut sent: HashMap<(&'static str, String), String> = HashMap::new();
+        // A pass after `sent` was emptied sends everything, so it ends with a
+        // `full_config` per kind: an object removed meanwhile has no other record.
+        let mut full_pass = true;
         loop {
             // A record made while no sink takes it, or before the journal runs
             // (Standby, startup), is dropped: send the whole snapshot again
@@ -30,6 +33,7 @@ pub fn spawn(stores: ConfigStores) {
                 && crate::delegation_vault::audit::wants("config_object");
             if !ready {
                 sent.clear();
+                full_pass = true;
             } else if let Some(objects) = collect(&stores).await {
                 for (key, hash) in changes(&mut sent, &objects) {
                     crate::delegation_vault::audit::audit_config_object(
@@ -37,6 +41,12 @@ pub fn spawn(stores: ConfigStores) {
                         &key.1,
                         hash.and_then(|_| objects.get(&key).cloned()),
                     );
+                }
+                if full_pass {
+                    for (kind, ids) in full_config(&stores.kinds(), &objects) {
+                        crate::delegation_vault::audit::audit_full_config(kind, ids);
+                    }
+                    full_pass = false;
                 }
             }
             tokio::time::sleep(INTERVAL).await;
@@ -82,6 +92,43 @@ async fn collect(stores: &ConfigStores) -> Option<HashMap<(&'static str, String)
     Some(objects)
 }
 
+impl ConfigStores {
+    fn kinds(&self) -> Vec<&'static str> {
+        [
+            ("surface", self.surfaces.is_some()),
+            ("policy", self.policies.is_some()),
+            (
+                "trust_registry",
+                self.trust_registries
+                    .is_some(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(kind, configured)| configured.then_some(kind))
+        .collect()
+    }
+}
+
+/// Every id of each of `kinds`, sorted; a kind with no objects answers an
+/// empty list.
+fn full_config(
+    kinds: &[&'static str],
+    objects: &HashMap<(&'static str, String), Value>,
+) -> Vec<(&'static str, Vec<String>)> {
+    kinds
+        .iter()
+        .map(|kind| {
+            let mut ids: Vec<String> = objects
+                .keys()
+                .filter(|key| key.0 == *kind)
+                .map(|key| key.1.clone())
+                .collect();
+            ids.sort();
+            (*kind, ids)
+        })
+        .collect()
+}
+
 fn changes(
     sent: &mut HashMap<(&'static str, String), String>,
     objects: &HashMap<(&'static str, String), Value>,
@@ -104,4 +151,22 @@ fn changes(
         out.push((key, None));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_config_lists_every_id_of_each_kind_and_an_empty_kind_too() {
+        let objects = HashMap::from([
+            (("policy", "b".to_string()), json!({})),
+            (("policy", "a".to_string()), json!({})),
+            (("surface", "s".to_string()), json!({})),
+        ]);
+        assert_eq!(
+            full_config(&["policy", "trust_registry"], &objects),
+            [("policy", vec!["a".to_string(), "b".to_string()]), ("trust_registry", vec![])]
+        );
+    }
 }

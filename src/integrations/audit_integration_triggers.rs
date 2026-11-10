@@ -482,6 +482,7 @@ mod tests {
             | DelegationAuditAction::PolicyDecision { .. }
             | DelegationAuditAction::TrustCheck { .. }
             | DelegationAuditAction::ConfigObject { .. }
+            | DelegationAuditAction::FullConfig { .. }
             | DelegationAuditAction::TraceTerminated { .. }
             | DelegationAuditAction::PaymentEvent(_)
             | DelegationAuditAction::AuthFailed { .. }
@@ -533,6 +534,10 @@ mod tests {
                 kind: "surface".to_string(),
                 id: "s".to_string(),
                 object: None,
+            },
+            DelegationAuditAction::FullConfig {
+                kind: "surface".to_string(),
+                ids: vec!["s".to_string()],
             },
             DelegationAuditAction::TraceTerminated {
                 own_trace_id: "own".to_string(),
