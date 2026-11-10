@@ -20,6 +20,7 @@ changes:
       description: >-
         Saving a policy without changing its Rego, name, description, type, enabled state or
         sample input no longer moves its `updated_at`, so it sends no new config audit record.
+        Neither does assigning a policy to the tenant that already owns it.
     - timestamp: '2026-11-09T00:00:00Z'
       title: Return the stored policy from a policy definition update
       description: >-

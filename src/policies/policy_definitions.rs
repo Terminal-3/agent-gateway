@@ -529,6 +529,9 @@ impl FileSystemPolicyDefinitionStore {
             .get_document(id)
             .await
             .ok_or_else(|| anyhow::anyhow!("Policy definition not found: {}", id))?;
+        if document.tenant_id == tenant_id {
+            return Ok(document.to_definition());
+        }
         document.tenant_id = tenant_id;
         document.updated_at = Some(chrono::Utc::now().to_rfc3339());
         self.storage
@@ -908,6 +911,24 @@ mod tests {
             .expect("doc");
         assert_eq!(doc.current_version, 1, "metadata edit must not bump version");
         assert_eq!(doc.versions.len(), 1);
+        let stamped = doc.updated_at.clone();
+
+        store
+            .set_tenant_id("id", None)
+            .await
+            .expect("same owner");
+        let same_owner = store
+            .get_document("id")
+            .await
+            .expect("doc");
+        assert_eq!(same_owner.updated_at, stamped, "an unchanged owner must not move updated_at");
+
+        let reassigned = store
+            .set_tenant_id("id", Some("tenant-a".into()))
+            .await
+            .expect("new owner");
+        assert_eq!(reassigned.tenant_id.as_deref(), Some("tenant-a"));
+        assert_ne!(reassigned.updated_at, stamped);
         assert_eq!(doc.name, "renamed");
         assert_eq!(
             doc.current()
