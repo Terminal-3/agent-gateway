@@ -8,6 +8,12 @@ changes:
         `version_created_by` and `version_created_at` for the version the gateway enforces.
         Each is left out when unknown, as with the author of a policy loaded from a legacy
         file.
+    - timestamp: '2026-11-10T00:00:00Z'
+      title: Name the admin's username and full name in policy change records
+      description: >-
+        A policy change record's `actor` carries the user's `username` and, when they have a
+        first or last name, `name`, alongside their id; for an access token these are its
+        owner's. The id stays the identifier, since names can collide.
   changed:
     - timestamp: '2026-11-09T00:00:00Z'
       title: Leave a policy's last-changed time alone on a save that changes nothing

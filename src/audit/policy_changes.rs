@@ -582,6 +582,28 @@ mod tests {
         assert_eq!(record.channel_name.as_deref(), Some("Orders"));
     }
 
+    #[tokio::test]
+    async fn a_policy_change_names_the_person_behind_its_actor() {
+        let actor = Actor::pat("t-1", "u-1").with_names(Some("ada".to_string()), Some("Ada Lovelace".to_string()));
+        let ((), records) = capture(in_management_request(actor, async {
+            record(PolicyChangeAction::PolicyUpdated, of_definition(&stored(2, "allow"), PolicyChangeSource::Api));
+        }))
+        .await;
+
+        assert_eq!(records.len(), 1);
+        let json = serde_json::to_value(&records[0]).unwrap();
+        assert_eq!(
+            json["event"]["policy_updated"]["actor"],
+            serde_json::json!({
+                "kind": "pat",
+                "id": "t-1",
+                "user_id": "u-1",
+                "username": "ada",
+                "name": "Ada Lovelace"
+            })
+        );
+    }
+
     fn surface(policies: serde_json::Value) -> AgentSurface {
         let mut value = serde_json::json!({
             "surface_id": "s-1",
