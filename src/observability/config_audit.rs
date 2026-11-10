@@ -125,9 +125,9 @@ fn full_config(
 }
 
 /// The audited view of a policy: its current version, when it was created and
-/// last changed and by whom, and the current version's author and time.
-/// Absent times and authors are left out. A save that changes nothing leaves
-/// the object, and so the audit, unchanged.
+/// last changed, and the current version's author and time. Absent times and
+/// authors are left out. A save that changes nothing leaves the object, and so
+/// the audit, unchanged.
 fn policy_object(document: &PolicyDocument) -> Value {
     let policy = document.to_definition();
     let current = document.current();
@@ -143,7 +143,6 @@ fn policy_object(document: &PolicyDocument) -> Value {
     });
     let optional = [
         ("updated_at", document.updated_at.clone()),
-        ("updated_by", document.updated_by.clone()),
         ("version_created_by", current.and_then(|v| v.created_by.clone())),
         ("version_created_at", current.map(|v| v.created_at.clone())),
     ];
@@ -226,7 +225,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_object_names_the_last_change_and_the_current_version() {
+    async fn policy_object_keeps_the_version_author_through_a_rename_and_a_no_op_save() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp
             .path()
@@ -252,9 +251,8 @@ mod tests {
         let before = policy_object(&before[0]);
         assert_eq!(before["version"], 2);
         assert_eq!(before["version_created_by"], "bob");
-        assert_eq!(before["updated_by"], "bob");
 
-        // A rename is a change by carol that keeps bob's version.
+        // A rename moves `updated_at` but keeps bob's version.
         let rename = renamed(v2, "Deny all");
         store
             .save_authored(rename.clone(), Some("carol".into()), None)
@@ -275,7 +273,6 @@ mod tests {
         assert_eq!(object["version_created_at"], before["version_created_at"]);
         assert_eq!(object["version_created_at"], current.created_at.as_str());
         assert_eq!(object["created_at"], document.created_at.as_str());
-        assert_eq!(object["updated_by"], "carol");
         assert_ne!(object["updated_at"], before["updated_at"]);
         assert_eq!(
             object["updated_at"],
@@ -297,33 +294,6 @@ mod tests {
         assert_eq!(policy_object(&documents[0]), object);
     }
 
-    #[tokio::test]
-    async fn policy_object_names_who_changed_the_owner() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp
-            .path()
-            .to_string_lossy()
-            .into_owned();
-        let store = FileSystemPolicyDefinitionStore::new(root)
-            .await
-            .expect("store");
-        store
-            .save_authored(definition("package gateway.policy"), Some("alice".into()), None)
-            .await
-            .expect("v1");
-        store
-            .set_tenant_id("p1", Some("tenant-a".into()), Some("erin".into()))
-            .await
-            .expect("owner");
-        let documents = store
-            .try_list_documents()
-            .await
-            .expect("list");
-        let object = policy_object(&documents[0]);
-        assert_eq!(object["updated_by"], "erin");
-        assert_eq!(object["version_created_by"], "alice");
-    }
-
     #[test]
     fn policy_object_omits_the_author_of_a_legacy_policy() {
         let mut value = json!({
@@ -341,11 +311,6 @@ mod tests {
         assert!(
             object
                 .get("version_created_by")
-                .is_none()
-        );
-        assert!(
-            object
-                .get("updated_by")
                 .is_none()
         );
         assert_eq!(object["version_created_at"], "2026-01-01T00:00:00Z");

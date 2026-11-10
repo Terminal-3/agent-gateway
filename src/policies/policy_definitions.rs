@@ -317,9 +317,6 @@ pub struct PolicyDocument {
     /// ISO 8601 last-updated timestamp (document metadata or new version).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
-    /// Admin who made the change `updated_at` records, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_by: Option<String>,
     /// Append-only revision history (never mutated post-creation).
     pub versions: Vec<PolicyVersion>,
     /// Saved sample input for the policy dry-run (document-level; not versioned).
@@ -527,7 +524,6 @@ impl FileSystemPolicyDefinitionStore {
         &self,
         id: &str,
         tenant_id: Option<String>,
-        author: Option<String>,
     ) -> Result<PolicyDefinition> {
         let mut document = self
             .get_document(id)
@@ -535,7 +531,6 @@ impl FileSystemPolicyDefinitionStore {
             .ok_or_else(|| anyhow::anyhow!("Policy definition not found: {}", id))?;
         document.tenant_id = tenant_id;
         document.updated_at = Some(chrono::Utc::now().to_rfc3339());
-        document.updated_by = author;
         self.storage
             .save(&document)
             .await?;
@@ -596,7 +591,6 @@ impl FileSystemPolicyDefinitionStore {
                     && existing.sample_input == policy.sample_input;
                 if !(unchanged && metadata_unchanged) {
                     existing.updated_at = Some(now.clone());
-                    existing.updated_by = author.clone();
                 }
                 existing.name = name.clone();
                 existing.description = description.clone();
@@ -650,7 +644,6 @@ impl FileSystemPolicyDefinitionStore {
                     current_version: 1,
                     created_at,
                     updated_at: Some(now.clone()),
-                    updated_by: author.clone(),
                     versions: vec![PolicyVersion {
                         version: 1,
                         policy: policy.policy,
@@ -704,7 +697,6 @@ impl FileSystemPolicyDefinitionStore {
                     entry.content_hash = new_hash;
                 }
                 doc.updated_at = Some(chrono::Utc::now().to_rfc3339());
-                doc.updated_by = None;
                 self.storage
                     .save(&doc)
                     .await?;

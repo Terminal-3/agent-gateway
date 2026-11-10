@@ -160,7 +160,7 @@ pub async fn get_policy_definition(
 /// Resolve the authenticated caller to a human-readable username for the policy
 /// version author, falling back to the raw user id when it can't be resolved
 /// (unknown user, or no passkey store on this route).
-pub(crate) async fn resolve_author(
+async fn resolve_author(
     caller: Option<Extension<AuthGuardOk>>,
     passkey_storage: Option<Extension<std::sync::Arc<PasskeyStorage>>>,
 ) -> Option<String> {
@@ -1058,7 +1058,6 @@ mod simulate_tests {
             current_version: 1,
             created_at: "t".into(),
             updated_at: None,
-            updated_by: None,
             versions: vec![PolicyVersion {
                 version: 1,
                 policy: rego.into(),

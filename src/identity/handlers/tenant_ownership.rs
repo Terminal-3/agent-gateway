@@ -5,7 +5,6 @@ use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::a2a_proxies::A2aProxyStore;
-use crate::auth::storage::PasskeyStorage;
 use crate::auth_manager::middleware::AuthGuardOk;
 use crate::auth_manager::pat::{PatDelegationContext, PatResourceScope};
 use crate::authorities::AuthorityStore;
@@ -193,7 +192,6 @@ pub async fn reassign_ownership(
     context: Option<Extension<PatTenantContext>>,
     scope: Option<Extension<PatResourceScope>>,
     caller: Option<Extension<AuthGuardOk>>,
-    passkey_storage: Option<Extension<std::sync::Arc<PasskeyStorage>>>,
     delegation: Option<Extension<PatDelegationContext>>,
     Json(request): Json<ReassignOwnershipRequest>,
 ) -> Result<Json<OwnershipReassignmentResponse>, OwnershipApiError> {
@@ -245,8 +243,7 @@ pub async fn reassign_ownership(
             .as_ref()
             .map(|Extension(delegation)| delegation.token_id.as_str()),
     );
-    let author = super::policy_definitions::resolve_author(caller, passkey_storage).await;
-    persist_tenant_id(&state, kind, &id, request.tenant_id.clone(), actor.as_ref(), author).await?;
+    persist_tenant_id(&state, kind, &id, request.tenant_id.clone(), actor.as_ref()).await?;
 
     Ok(Json(OwnershipReassignmentResponse {
         kind: kind.to_string(),
@@ -908,7 +905,6 @@ async fn persist_tenant_id(
     id: &str,
     tenant_id: Option<String>,
     actor: Option<&crate::delegation_vault::audit::AuditCallerContext>,
-    author: Option<String>,
 ) -> Result<(), OwnershipApiError> {
     match kind {
         ResourceKind::Gateways => {
@@ -1177,7 +1173,7 @@ async fn persist_tenant_id(
             let _change = store.lock_changes().await;
             let before = store.get(id).await;
             let after = store
-                .set_tenant_id(id, tenant_id, author)
+                .set_tenant_id(id, tenant_id)
                 .await
                 .map_err(internal)?;
             if let Some(before) = before
