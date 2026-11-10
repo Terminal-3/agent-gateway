@@ -168,6 +168,7 @@ fn record_oob_connection(
         trust_registry.main_did = connection_info.main_did;
         trust_registry.mediator_url = Some(connection_info.mediator_url);
         trust_registry.mediator_did = Some(connection_info.mediator_did);
+        trust_registry.setup_thid = connection_info.setup_thid;
         if !matches!(
             trust_registry.connection_status,
             TrustRegistryConnectionStatus::AwaitingApproval | TrustRegistryConnectionStatus::Connected

@@ -1,0 +1,16 @@
+branch: tr-stray-report-agent-gateway-errol
+changes:
+  added: []
+  changed: []
+  fixed:
+    - timestamp: '2026-11-10T12:00:00Z'
+      title: Keep a trust registry usable after a stray problem report
+      description: >-
+        A trust registry is now marked Failed only by a problem report on the thread of the
+        gateway's connection-setup message, which the gateway records with the registry. Any
+        other problem report that answers no pending query is logged as a warning with its
+        thread ids and leaves the registry's status unchanged, so a connected or reconnected
+        registry keeps serving trust checks and Trust Recorder writes.
+  removed: []
+  security: []
+  breaking: []
