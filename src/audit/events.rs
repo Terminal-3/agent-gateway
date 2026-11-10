@@ -190,7 +190,9 @@ pub enum ActorKind {
     System,
 }
 
-/// Who made a management change: ids only, never a name or credential.
+/// Who made a management change: its ids, plus the names of the person behind
+/// it when known. The ids identify the actor, since names can collide; the
+/// record never carries a credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Actor {
     pub kind: ActorKind,
@@ -199,6 +201,12 @@ pub struct Actor {
     /// For an access token, the id of the user it belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    /// The user's username; for an access token, its owner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// The user's first and last name; for an access token, its owner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Actor {
@@ -207,6 +215,8 @@ impl Actor {
             kind: ActorKind::User,
             id: id.into(),
             user_id: None,
+            username: None,
+            name: None,
         }
     }
 
@@ -218,6 +228,8 @@ impl Actor {
             kind: ActorKind::Pat,
             id: token_id.into(),
             user_id: Some(user_id.into()),
+            username: None,
+            name: None,
         }
     }
 
@@ -226,8 +238,36 @@ impl Actor {
             kind: ActorKind::System,
             id: "gateway".to_string(),
             user_id: None,
+            username: None,
+            name: None,
         }
     }
+
+    /// This actor naming the person behind it.
+    pub fn with_names(
+        mut self,
+        username: Option<String>,
+        name: Option<String>,
+    ) -> Self {
+        self.username = username;
+        self.name = name;
+        self
+    }
+}
+
+/// A first and last name joined with a space, or `None` when both are empty.
+pub fn full_name(
+    first_name: Option<&str>,
+    last_name: Option<&str>,
+) -> Option<String> {
+    let name = [first_name, last_name]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!name.is_empty()).then_some(name)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,4 +293,44 @@ pub enum RefusalReason {
     Invalid,
     /// 409: the change conflicts with what is stored.
     Conflict,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_name_joins_whichever_parts_are_present() {
+        assert_eq!(full_name(Some("Ada"), Some("Lovelace")).as_deref(), Some("Ada Lovelace"));
+        assert_eq!(full_name(Some(" Ada "), None).as_deref(), Some("Ada"));
+        assert_eq!(full_name(Some(""), Some("Lovelace")).as_deref(), Some("Lovelace"));
+        assert_eq!(full_name(Some(" "), Some("")), None);
+        assert_eq!(full_name(None, None), None);
+    }
+
+    #[test]
+    fn an_actor_names_the_person_behind_it() {
+        let user = Actor::user("u-1").with_names(Some("ada".to_string()), Some("Ada Lovelace".to_string()));
+        let pat = Actor::pat("t-1", "u-1").with_names(Some("ada".to_string()), None);
+
+        assert_eq!(
+            serde_json::to_value(&user).unwrap(),
+            serde_json::json!({"kind": "user", "id": "u-1", "username": "ada", "name": "Ada Lovelace"})
+        );
+        assert_eq!(
+            serde_json::to_value(&pat).unwrap(),
+            serde_json::json!({"kind": "pat", "id": "t-1", "user_id": "u-1", "username": "ada"})
+        );
+    }
+
+    #[test]
+    fn an_actor_without_names_leaves_them_out() {
+        assert_eq!(serde_json::to_value(Actor::user("u-1")).unwrap(), serde_json::json!({"kind": "user", "id": "u-1"}));
+        assert_eq!(
+            serde_json::to_value(Actor::system()).unwrap(),
+            serde_json::json!({"kind": "system", "id": "gateway"})
+        );
+        let read: Actor = serde_json::from_value(serde_json::json!({"kind": "user", "id": "u-1"})).unwrap();
+        assert_eq!(read, Actor::user("u-1"));
+    }
 }

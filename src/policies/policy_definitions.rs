@@ -504,19 +504,12 @@ impl FileSystemPolicyDefinitionStore {
             .collect()
     }
 
-    /// Like [`Self::list`], `None` when the storage cannot be listed.
-    pub async fn try_list(&self) -> Option<Vec<PolicyDefinition>> {
-        let documents = self
-            .storage
+    /// Like [`Self::list_documents`], `None` when the storage cannot be listed.
+    pub async fn try_list_documents(&self) -> Option<Vec<PolicyDocument>> {
+        self.storage
             .list_all()
             .await
-            .ok()?;
-        Some(
-            documents
-                .iter()
-                .map(PolicyDocument::to_definition)
-                .collect(),
-        )
+            .ok()
     }
 
     /// List all versioned documents.
@@ -536,6 +529,9 @@ impl FileSystemPolicyDefinitionStore {
             .get_document(id)
             .await
             .ok_or_else(|| anyhow::anyhow!("Policy definition not found: {}", id))?;
+        if document.tenant_id == tenant_id {
+            return Ok(document.to_definition());
+        }
         document.tenant_id = tenant_id;
         document.updated_at = Some(chrono::Utc::now().to_rfc3339());
         self.storage
@@ -588,15 +584,22 @@ impl FileSystemPolicyDefinitionStore {
             Some(mut existing) => {
                 let name = policy.name;
                 let description = policy.description;
+                let unchanged = existing
+                    .current()
+                    .is_some_and(|v| v.content_hash == hash);
+                let metadata_unchanged = existing.name == name
+                    && existing.description == description
+                    && existing.policy_type == policy.policy_type
+                    && existing.enabled == policy.enabled
+                    && existing.sample_input == policy.sample_input;
+                if !(unchanged && metadata_unchanged) {
+                    existing.updated_at = Some(now.clone());
+                }
                 existing.name = name.clone();
                 existing.description = description.clone();
                 existing.policy_type = policy.policy_type;
                 existing.enabled = policy.enabled;
                 existing.sample_input = policy.sample_input;
-                existing.updated_at = Some(now.clone());
-                let unchanged = existing
-                    .current()
-                    .is_some_and(|v| v.content_hash == hash);
                 if unchanged {
                     // Metadata-only edit: keep the current revision's name /
                     // description snapshot in sync; older revisions stay frozen.
@@ -908,6 +911,29 @@ mod tests {
             .expect("doc");
         assert_eq!(doc.current_version, 1, "metadata edit must not bump version");
         assert_eq!(doc.versions.len(), 1);
+        let stamped = doc.updated_at.clone();
+
+        store
+            .set_tenant_id("id", None)
+            .await
+            .expect("same owner");
+        let same_owner = store
+            .get_document("id")
+            .await
+            .expect("doc");
+        assert_eq!(same_owner.updated_at, stamped, "an unchanged owner must not move updated_at");
+
+        let reassigned = store
+            .set_tenant_id("id", Some("tenant-a".into()))
+            .await
+            .expect("new owner");
+        assert_eq!(
+            reassigned
+                .tenant_id
+                .as_deref(),
+            Some("tenant-a")
+        );
+        assert_ne!(reassigned.updated_at, stamped);
         assert_eq!(doc.name, "renamed");
         assert_eq!(
             doc.current()

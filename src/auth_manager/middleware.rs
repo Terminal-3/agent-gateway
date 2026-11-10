@@ -1,6 +1,6 @@
 use crate::auth::session::{SessionManager, TermsSessionGate};
 use crate::auth::session_cookie;
-use crate::auth::storage::PasskeyStorage;
+use crate::auth::storage::{PasskeyStorage, UserData};
 use crate::auth::types::UserStatus;
 use crate::observability::loggable;
 use axum::{
@@ -222,17 +222,21 @@ pub async fn require_session_auth(
         .await
     {
         let user_id = session.user_id.clone();
-        if let Some(storage) = state.user_storage.as_ref()
-            && !user_is_approved(storage, &user_id).await
-        {
-            warn!("require_session_auth: session valid but user_id={} is not Approved — rejecting {}", user_id, path);
-            return StatusCode::UNAUTHORIZED.into_response();
+        let mut actor = crate::audit::events::Actor::user(user_id.clone());
+        if let Some(storage) = state.user_storage.as_ref() {
+            let Some(user) = approved_user(storage, &user_id).await else {
+                warn!(
+                    "require_session_auth: session valid but user_id={} is not Approved — rejecting {}",
+                    user_id, path
+                );
+                return StatusCode::UNAUTHORIZED.into_response();
+            };
+            actor = named_after(actor, &user);
         }
 
         // Everything from here runs as the user, with a request id of its
         // own, so a refusal below is recorded with the id its route's
         // refusals carry.
-        let actor = crate::audit::events::Actor::user(user_id.clone());
         return crate::audit::context::in_management_request(actor.clone(), async move {
             if session.terms_gate == TermsSessionGate::ConsentPending && !CONSENT_PENDING_PATHS.contains(&path.as_str())
             {
@@ -283,17 +287,17 @@ pub async fn require_session_auth(
             .authenticate(&session_token)
             .await
     {
-        if let Some(storage) = state.user_storage.as_ref()
-            && !user_is_approved(storage, &principal.user_id).await
-        {
-            warn!(
-                "require_session_auth: access token valid but bound user_id={} is not Approved — rejecting {}",
-                principal.user_id, path
-            );
-            return StatusCode::UNAUTHORIZED.into_response();
+        let mut actor = crate::audit::events::Actor::pat(principal.token_id.clone(), principal.user_id.clone());
+        if let Some(storage) = state.user_storage.as_ref() {
+            let Some(owner) = approved_user(storage, &principal.user_id).await else {
+                warn!(
+                    "require_session_auth: access token valid but bound user_id={} is not Approved — rejecting {}",
+                    principal.user_id, path
+                );
+                return StatusCode::UNAUTHORIZED.into_response();
+            };
+            actor = named_after(actor, &owner);
         }
-
-        let actor = crate::audit::events::Actor::pat(principal.token_id.clone(), principal.user_id.clone());
         return crate::audit::context::in_management_request(
             actor.clone(),
             access_token_request(&state, principal, actor, request, path, next),
@@ -525,27 +529,50 @@ pub async fn extract_user_id(
     Ok(next.run(request).await)
 }
 
-/// Returns true when the user record exists and has `UserStatus::Approved`.
-/// Any other state (New, Disabled, missing, or storage error) is treated
-/// as not approved — the safer choice for an auth gate.
+/// True when [`approved_user`] finds the user.
 pub(crate) async fn user_is_approved(
     storage: &PasskeyStorage,
     user_id: &str,
 ) -> bool {
+    approved_user(storage, user_id)
+        .await
+        .is_some()
+}
+
+/// The user record when it exists and has `UserStatus::Approved`. Any other
+/// state (New, Disabled, missing, or storage error) is `None`, not approved —
+/// the safer choice for an auth gate.
+async fn approved_user(
+    storage: &PasskeyStorage,
+    user_id: &str,
+) -> Option<UserData> {
     match storage
         .load_user_by_id(user_id)
         .await
     {
-        Ok(Some(u)) => u.status == UserStatus::Approved,
+        Ok(Some(u)) => (u.status == UserStatus::Approved).then_some(u),
         Ok(None) => {
-            warn!("user_is_approved: user_id={} not found in storage", user_id);
-            false
+            warn!("approved_user: user_id={} not found in storage", user_id);
+            None
         }
         Err(e) => {
-            warn!("user_is_approved: failed to load user_id={}: {}", user_id, e);
-            false
+            warn!("approved_user: failed to load user_id={}: {}", user_id, e);
+            None
         }
     }
+}
+
+/// `actor` naming `user`, the person behind it.
+fn named_after(
+    actor: crate::audit::events::Actor,
+    user: &UserData,
+) -> crate::audit::events::Actor {
+    let username = match user.username.as_str() {
+        "" => None,
+        username => Some(username.to_string()),
+    };
+    let name = crate::audit::events::full_name(user.first_name.as_deref(), user.last_name.as_deref());
+    actor.with_names(username, name)
 }
 
 /// Build a route-level layer that enforces RBAC against a specific `Feature`.
@@ -1420,6 +1447,64 @@ mod tests {
         );
         assert_ne!(first["request_id"], second["request_id"]);
         assert_ne!(first["request_id"], by_pat["request_id"]);
+    }
+
+    fn audit_context_app(
+        sessions: Arc<SessionManager>,
+        storage: Arc<PasskeyStorage>,
+    ) -> Router {
+        Router::new()
+            .route("/v1/policy-definitions", get(audit_context_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                AuthGuardState::new(sessions, Some(storage), Arc::new(crate::terms::TermsManager::disabled()))
+                    .with_pat_authenticator(Some(Arc::new(TermsTestPat))),
+                require_session_auth,
+            ))
+    }
+
+    #[tokio::test]
+    async fn the_actor_names_the_user_and_an_access_tokens_owner() {
+        let mut user = mk_user_data("user-1", "ada", UserStatus::Approved);
+        user.first_name = Some("Ada".to_string());
+        user.last_name = Some("Lovelace".to_string());
+        let (storage, _tmp) = make_storage_with_user(user).await;
+        let sessions = Arc::new(SessionManager::new());
+        let app = audit_context_app(sessions.clone(), storage);
+        let token = sessions
+            .create_session("ada".into(), "user-1".into())
+            .await;
+
+        let by_session = audit_context_of(&app, &token).await;
+        let by_pat = audit_context_of(&app, "terms-test-pat").await;
+
+        assert_eq!(
+            by_session["actor"],
+            serde_json::json!({"kind": "user", "id": "user-1", "username": "ada", "name": "Ada Lovelace"})
+        );
+        assert_eq!(
+            by_pat["actor"],
+            serde_json::json!({
+                "kind": "pat",
+                "id": "test-token",
+                "user_id": "user-1",
+                "username": "ada",
+                "name": "Ada Lovelace"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_actor_of_a_user_without_a_name_carries_only_the_username() {
+        let (storage, _tmp) = make_storage_with_user(mk_user_data("user-1", "ada", UserStatus::Approved)).await;
+        let sessions = Arc::new(SessionManager::new());
+        let app = audit_context_app(sessions.clone(), storage);
+        let token = sessions
+            .create_session("ada".into(), "user-1".into())
+            .await;
+
+        let by_session = audit_context_of(&app, &token).await;
+
+        assert_eq!(by_session["actor"], serde_json::json!({"kind": "user", "id": "user-1", "username": "ada"}));
     }
 
     struct ScopedPat;

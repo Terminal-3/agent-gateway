@@ -298,10 +298,10 @@ pub async fn update_policy_definition(
             error!("Failed to update policy definition: {}", e);
             AppError::InternalError(format!("Failed to update policy definition: {}", e))
         })?;
-    if let Some(updated) = store
-        .get(&policy_id)
-        .await
-        .and_then(|after| policy_changes::definition_updated(&existing, &after, PolicyChangeSource::Api))
+    let saved = store.get(&policy_id).await;
+    if let Some(updated) = saved
+        .as_ref()
+        .and_then(|after| policy_changes::definition_updated(&existing, after, PolicyChangeSource::Api))
     {
         policy_changes::record(PolicyChangeAction::PolicyUpdated, updated);
     }
@@ -403,7 +403,7 @@ pub async fn update_policy_definition(
         .ws_state
         .broadcast(crate::server::WsUpdate::RefreshDashboard);
 
-    Ok(Json(response))
+    Ok(Json(saved.unwrap_or(response)))
 }
 
 /// Delete a policy definition

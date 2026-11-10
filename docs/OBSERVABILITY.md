@@ -431,13 +431,16 @@ where a policy applies (group Policies). Each record carries its body in the `ev
 
 Every record names its `actor`: `{kind: "user", id}` for a signed-in user, `{kind: "pat", id,
 user_id}` for an access token (its id, never its value, and its owner's user id) or
-`{kind: "system", id: "gateway"}`. `source` is `api`, `ownership` (a definition's tenant was
-reassigned) or `definition_deleted` (deleting a definition pruned its appliance-wide
-assignments). Policy ids, versions and content hashes are those `policy_decision` records carry,
-so a change joins to the decisions it causes. No record carries the Rego text, the sample input
-or a request body. Writes made outside a management request (startup migrations, replication)
-record nothing, and neither do writes a configuration reload makes, though the reload is asked
-for through the management API: it is the gateway's own work, not the user's change.
+`{kind: "system", id: "gateway"}`. A user or access token actor also carries the user's
+`username` and, when they have a first or last name, `name` (the two joined with a space); for
+an access token these are its owner's. The id identifies the actor, since names can collide.
+`source` is `api`, `ownership` (a definition's tenant was reassigned) or `definition_deleted`
+(deleting a definition pruned its appliance-wide assignments). Policy ids, versions and content
+hashes are those `policy_decision` records carry, so a change joins to the decisions it causes.
+No record carries the Rego text, the sample input or a request body. Writes made outside a
+management request (startup migrations, replication) record nothing, and neither do writes a
+configuration reload makes, though the reload is asked for through the management API: it is
+the gateway's own work, not the user's change.
 
 **Volume.** Request events are unbounded by design: each is recorded once per request, with no
 aggregation or sampling. `auth_failed` and the routing `request_rejected` are recorded before

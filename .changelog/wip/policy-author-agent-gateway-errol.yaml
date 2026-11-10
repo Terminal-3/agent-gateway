@@ -1,0 +1,32 @@
+branch: policy-author-agent-gateway-errol
+changes:
+  added:
+    - timestamp: '2026-11-09T00:00:00Z'
+      title: Name each policy's current version author and time in config audit
+      description: >-
+        A policy's `config_object` audit record carries `created_at` and `updated_at`, plus
+        `version_created_by` and `version_created_at` for the version the gateway enforces.
+        Each is left out when unknown, as with the author of a policy loaded from a legacy
+        file.
+    - timestamp: '2026-11-10T00:00:00Z'
+      title: Name the admin's username and full name in policy change records
+      description: >-
+        A policy change record's `actor` carries the user's `username` and, when they have a
+        first or last name, `name`, alongside their id; for an access token these are its
+        owner's. The id stays the identifier, since names can collide.
+  changed:
+    - timestamp: '2026-11-09T00:00:00Z'
+      title: Leave a policy's last-changed time alone on a save that changes nothing
+      description: >-
+        Saving a policy without changing its Rego, name, description, type, enabled state or
+        sample input no longer moves its `updated_at`, so it sends no new config audit record.
+        Neither does assigning a policy to the tenant that already owns it.
+    - timestamp: '2026-11-09T00:00:00Z'
+      title: Return the stored policy from a policy definition update
+      description: >-
+        `PUT /v1/policy-definitions/{policy_id}` answers with the policy as stored, so its
+        `updated_at`, `version` and `content_hash` match a later read.
+  fixed: []
+  removed: []
+  security: []
+  breaking: []
