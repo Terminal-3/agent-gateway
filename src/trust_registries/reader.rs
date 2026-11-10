@@ -190,8 +190,8 @@ fn rejects_setup(
         .any(|thid| thid.as_deref() == Some(setup_thid))
 }
 
-/// Persist a connection-status change and refresh the dashboard. A no-op when
-/// no store is configured.
+/// Persist a connection-status change, with the setup thread it belongs to, and
+/// refresh the dashboard. A no-op when no store is configured.
 async fn update_status(
     connection: &TrustRegistryConnection,
     new_status: TrustRegistryConnectionStatus,
@@ -204,8 +204,12 @@ async fn update_status(
     let tr_id = &connection.trust_registry_id;
 
     let status_label = format!("{:?}", new_status);
+    let setup_thid = connection.setup_thid.clone();
     let change = Box::new(move |tr: &mut TrustRegistry| {
         tr.connection_status = new_status;
+        if setup_thid.is_some() {
+            tr.setup_thid = setup_thid;
+        }
         tr.updated_at = chrono::Utc::now();
     });
     match store
@@ -327,7 +331,36 @@ mod tests {
             handle_message(message, &connection, &store, &None).await;
 
             assert_eq!(status_of(&store, &connection).await, TrustRegistryConnectionStatus::Failed);
+            let stored = store
+                .as_ref()
+                .expect("store")
+                .get(&connection.trust_registry_id)
+                .await
+                .expect("get")
+                .expect("the registry is stored");
+            assert_eq!(stored.setup_thid.as_deref(), Some(SETUP_THID), "the rejected setup thread is recorded");
         }
+    }
+
+    #[tokio::test]
+    async fn a_problem_report_answering_a_query_under_the_setup_thread_goes_to_the_query() {
+        let (connection, store, _dir) = registry_with(TrustRegistryConnectionStatus::Connected).await;
+        let (waiter, answer) = tokio::sync::oneshot::channel();
+        connection
+            .response_waiters
+            .lock()
+            .await
+            .insert("thid-query".to_string(), waiter);
+        let message = report()
+            .thid("thid-query".to_string())
+            .pthid(SETUP_THID.to_string())
+            .finalize();
+
+        handle_message(message, &connection, &store, &None).await;
+
+        let delivered = answer.await.expect("the query receives the report");
+        assert_eq!(delivered.msg_type, MSG_TYPE_PROBLEM_REPORT);
+        assert_eq!(status_of(&store, &connection).await, TrustRegistryConnectionStatus::Connected);
     }
 
     #[tokio::test]

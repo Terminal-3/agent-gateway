@@ -1162,10 +1162,9 @@ impl TrustRegistryListenerManager {
             "channel_did": our_did,
         });
 
-        let message_id = uuid::Uuid::new_v4().to_string();
         let thread_id = uuid::Uuid::new_v4().to_string();
 
-        let message = DIDCommMessage::build(message_id.clone(), connection::SETUP.to_string(), setup_body)
+        let message = DIDCommMessage::build(thread_id.clone(), connection::SETUP.to_string(), setup_body)
             .from(our_did.clone())
             .to(inviter_did.clone())
             .thid(thread_id.clone())
@@ -3398,6 +3397,7 @@ mod tests {
     ) -> super::super::types::TrustRegistry {
         let mut registry = stored_registry(Some("did:example:gateway"), Some("did:example:mediator"));
         registry.registry_did = Some(format!("did:example:registry-{}", registry.id));
+        registry.setup_thid = Some(format!("setup-{}", registry.id));
         registry.connection_status = status;
         store
             .create(&registry)
@@ -3746,6 +3746,7 @@ mod tests {
         assert_eq!(connection.trust_registry_id, registry.id);
         assert!(!connection.is_temporary);
         assert_eq!(connection.our_did, "did:example:gateway", "the stored identity is used");
+        assert_eq!(connection.setup_thid, registry.setup_thid, "the stored setup thread is used");
         assert_eq!(super::super::test_builds::calls(&did), 0, "no temporary connection is built");
     }
 
