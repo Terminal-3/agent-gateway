@@ -151,8 +151,9 @@ async fn save_announced<S: TrustRegistryStore + 'static>(
 
 /// Splits an accepted OOB invitation into the change that records its identity on
 /// the registry's current record, which is then Connecting until the registry
-/// approves it unless the registry has already answered the setup, and the
-/// announcement of its new DID.
+/// approves it unless the registry has already answered this setup, and the
+/// announcement of its new DID. A Failed status recorded for an earlier setup
+/// thread does not count as an answer.
 fn record_oob_connection(
     connection_info: super::communication::OobConnectionInfo
 ) -> (RegistryChange, crate::event_hook::CreationGuard) {
@@ -168,10 +169,16 @@ fn record_oob_connection(
         trust_registry.main_did = connection_info.main_did;
         trust_registry.mediator_url = Some(connection_info.mediator_url);
         trust_registry.mediator_did = Some(connection_info.mediator_did);
-        if !matches!(
-            trust_registry.connection_status,
-            TrustRegistryConnectionStatus::AwaitingApproval | TrustRegistryConnectionStatus::Connected
-        ) {
+        let rejected = trust_registry.connection_status == TrustRegistryConnectionStatus::Failed
+            && connection_info.setup_thid.is_some()
+            && trust_registry.setup_thid == connection_info.setup_thid;
+        trust_registry.setup_thid = connection_info.setup_thid;
+        if !rejected
+            && !matches!(
+                trust_registry.connection_status,
+                TrustRegistryConnectionStatus::AwaitingApproval | TrustRegistryConnectionStatus::Connected
+            )
+        {
             trust_registry.connection_status = TrustRegistryConnectionStatus::Connecting;
         }
         trust_registry.updated_at = chrono::Utc::now();
@@ -1495,6 +1502,40 @@ mod tests {
         assert_eq!(stored.connection_status, TrustRegistryConnectionStatus::Connecting);
         assert_eq!(stored.our_did, expected_did);
         assert_eq!(stored.mediator_url.as_deref(), Some("https://mediator.example"));
+        assert_eq!(stored.setup_thid, Some(format!("setup-{}", registry.id)));
+    }
+
+    #[tokio::test]
+    async fn a_rejection_of_the_setup_before_its_save_keeps_the_registry_failed() {
+        let (store, mut registry, manager, _dir) = never_connected_registry().await;
+        registry.setup_thid = Some(format!("setup-{}", registry.id));
+        assert!(
+            crate::trust_registries::store::overwrite(store.as_ref(), &registry)
+                .await
+                .unwrap()
+        );
+        crate::trust_registries::test_builds::install(
+            &registry.id,
+            vec![crate::trust_registries::test_builds::Outcome::Connect],
+        );
+
+        let Json(reconnected) = reconnect_trust_registry(
+            Extension(store.clone()),
+            Some(Extension(manager)),
+            Path(registry.id.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("the setup is saved");
+
+        assert_eq!(reconnected.connection_status, TrustRegistryConnectionStatus::Failed);
+        let stored = store
+            .get(&registry.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.connection_status, TrustRegistryConnectionStatus::Failed);
     }
 
     #[tokio::test]

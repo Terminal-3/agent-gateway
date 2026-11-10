@@ -4,8 +4,7 @@
 //! the mediator websocket via `live_stream_next`. It is the **sole** consumer of
 //! that stream: it demultiplexes query responses back to the `send_and_await`
 //! waiter registered under the response's thread id (`thid`), and drives the
-//! connection setup/approval status transitions that were previously handled by
-//! the standalone worker loop.
+//! connection setup/approval status transitions.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -135,7 +134,6 @@ async fn handle_message(
                     connection.trust_registry_id, thid
                 );
             } else {
-                // No query waiter → the registry rejected the gateway.
                 let code = message
                     .body
                     .get("code")
@@ -146,8 +144,18 @@ async fn handle_message(
                     .get("comment")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                error!("TR reader: problem-report for '{}': {}: {}", connection.trust_registry_id, code, comment);
-                update_status(connection, TrustRegistryConnectionStatus::Failed, store, ws_state).await;
+                if rejects_setup(&message, connection) {
+                    error!(
+                        "TR reader: problem-report for '{}' (thid {}, pthid {:?}, id {}): {}: {}",
+                        connection.trust_registry_id, thid, message.pthid, message.id, code, comment
+                    );
+                    update_status(connection, TrustRegistryConnectionStatus::Failed, store, ws_state).await;
+                } else {
+                    warn!(
+                        "TR reader: problem-report for '{}' matches no query (thid {}, pthid {:?}, id {}), ignoring: {}: {}",
+                        connection.trust_registry_id, thid, message.pthid, message.id, code, comment
+                    );
+                }
             }
         }
         other => {
@@ -168,8 +176,22 @@ async fn handle_message(
     }
 }
 
-/// Persist a connection-status change and refresh the dashboard, mirroring the
-/// former worker behavior. A no-op when no store is configured.
+/// Whether `message` is on the thread of the connection's setup message, which
+/// makes a problem report the registry rejecting the gateway.
+fn rejects_setup(
+    message: &DIDCommMessage,
+    connection: &TrustRegistryConnection,
+) -> bool {
+    let Some(setup_thid) = connection.setup_thid.as_deref() else {
+        return false;
+    };
+    [&message.thid, &message.pthid]
+        .into_iter()
+        .any(|thid| thid.as_deref() == Some(setup_thid))
+}
+
+/// Persist a connection-status change, with the setup thread it belongs to, and
+/// refresh the dashboard. A no-op when no store is configured.
 async fn update_status(
     connection: &TrustRegistryConnection,
     new_status: TrustRegistryConnectionStatus,
@@ -182,8 +204,12 @@ async fn update_status(
     let tr_id = &connection.trust_registry_id;
 
     let status_label = format!("{:?}", new_status);
+    let setup_thid = connection.setup_thid.clone();
     let change = Box::new(move |tr: &mut TrustRegistry| {
         tr.connection_status = new_status;
+        if setup_thid.is_some() {
+            tr.setup_thid = setup_thid;
+        }
         tr.updated_at = chrono::Utc::now();
     });
     match store
@@ -217,6 +243,8 @@ mod tests {
     use crate::trust_registries::types::TrustRegistry;
     use tokio::sync::Mutex;
 
+    const SETUP_THID: &str = "thid-setup";
+
     async fn registry_with(
         status: TrustRegistryConnectionStatus
     ) -> (TrustRegistryConnection, Option<Arc<dyn TrustRegistryStore>>, tempfile::TempDir) {
@@ -241,6 +269,7 @@ mod tests {
             registry_did: "did:example:registry".to_string(),
             main_did: None,
             mediator_did: "did:example:mediator".to_string(),
+            setup_thid: Some(SETUP_THID.to_string()),
             is_temporary: false,
             client: crate::trust_registries::test_builds::offline_client().await,
             response_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -249,14 +278,18 @@ mod tests {
         (connection, Some(Arc::new(store) as Arc<dyn TrustRegistryStore>), dir)
     }
 
-    fn problem_report(thid: &str) -> DIDCommMessage {
+    fn report() -> affinidi_messaging_didcomm::MessageBuilder {
         DIDCommMessage::build(
             uuid::Uuid::new_v4().to_string(),
             MSG_TYPE_PROBLEM_REPORT.to_string(),
             serde_json::json!({ "code": "e.p.rejected", "comment": "rejected" }),
         )
-        .thid(thid.to_string())
-        .finalize()
+    }
+
+    fn problem_report(thid: &str) -> DIDCommMessage {
+        report()
+            .thid(thid.to_string())
+            .finalize()
     }
 
     async fn status_of(
@@ -286,20 +319,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn any_other_unmatched_problem_report_marks_the_registry_failed() {
+    async fn a_problem_report_on_the_setup_thread_marks_the_registry_failed() {
+        let by_thid = problem_report(SETUP_THID);
+        let by_pthid = report()
+            .thid("thid-reply".to_string())
+            .pthid(SETUP_THID.to_string())
+            .finalize();
+        for message in [by_thid, by_pthid] {
+            let (connection, store, _dir) = registry_with(TrustRegistryConnectionStatus::AwaitingApproval).await;
+
+            handle_message(message, &connection, &store, &None).await;
+
+            assert_eq!(status_of(&store, &connection).await, TrustRegistryConnectionStatus::Failed);
+            let stored = store
+                .as_ref()
+                .expect("store")
+                .get(&connection.trust_registry_id)
+                .await
+                .expect("get")
+                .expect("the registry is stored");
+            assert_eq!(stored.setup_thid.as_deref(), Some(SETUP_THID), "the rejected setup thread is recorded");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_problem_report_answering_a_query_under_the_setup_thread_goes_to_the_query() {
+        let (connection, store, _dir) = registry_with(TrustRegistryConnectionStatus::Connected).await;
+        let (waiter, answer) = tokio::sync::oneshot::channel();
+        connection
+            .response_waiters
+            .lock()
+            .await
+            .insert("thid-query".to_string(), waiter);
+        let message = report()
+            .thid("thid-query".to_string())
+            .pthid(SETUP_THID.to_string())
+            .finalize();
+
+        handle_message(message, &connection, &store, &None).await;
+
+        let delivered = answer.await.expect("the query receives the report");
+        assert_eq!(delivered.msg_type, MSG_TYPE_PROBLEM_REPORT);
+        assert_eq!(status_of(&store, &connection).await, TrustRegistryConnectionStatus::Connected);
+    }
+
+    #[tokio::test]
+    async fn a_problem_report_on_another_thread_keeps_the_status() {
         for status in [
             TrustRegistryConnectionStatus::Connecting,
             TrustRegistryConnectionStatus::AwaitingApproval,
             TrustRegistryConnectionStatus::Connected,
         ] {
-            let (connection, store, _dir) = registry_with(status).await;
-            connection
-                .timed_out_queries
-                .record("thid-timed-out");
+            let (connection, store, _dir) = registry_with(status.clone()).await;
 
-            handle_message(problem_report("thid-rejection"), &connection, &store, &None).await;
+            handle_message(problem_report("thid-unmatched"), &connection, &store, &None).await;
 
-            assert_eq!(status_of(&store, &connection).await, TrustRegistryConnectionStatus::Failed);
+            assert_eq!(status_of(&store, &connection).await, status);
         }
+    }
+
+    #[tokio::test]
+    async fn a_problem_report_without_a_known_setup_thread_keeps_the_status() {
+        let (mut connection, store, _dir) = registry_with(TrustRegistryConnectionStatus::Connecting).await;
+        connection.setup_thid = None;
+
+        handle_message(problem_report(SETUP_THID), &connection, &store, &None).await;
+
+        assert_eq!(status_of(&store, &connection).await, TrustRegistryConnectionStatus::Connecting);
     }
 }

@@ -73,6 +73,11 @@ pub struct TrustRegistry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mediator_did: Option<String>,
 
+    /// Thread id of the connection-setup message sent to the registry; a
+    /// problem report on this thread is the registry rejecting the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_thid: Option<String>,
+
     /// DID method to use for the per-registry identity (web or peer)
     #[serde(default)]
     pub did_method: DidMethod,
@@ -110,6 +115,7 @@ impl TrustRegistry {
             registry_did: None,
             mediator_url: None,
             mediator_did: None,
+            setup_thid: None,
             did_method,
             connection_status: TrustRegistryConnectionStatus::Connecting,
             status: TrustRegistryStatus::Active,
@@ -393,6 +399,25 @@ mod tests {
 
         registry.main_did = Some("did:example:main".into());
         assert_eq!(registry.query_did(), Some("did:example:main"));
+    }
+
+    #[test]
+    fn a_stored_registry_without_a_setup_thread_loads() {
+        let mut registry = TrustRegistry::new(
+            "registry".into(),
+            String::new(),
+            "https://registry.example/oob".into(),
+            DidMethod::default(),
+        );
+        let stored = serde_json::to_value(&registry).expect("serialise");
+        assert!(stored.get("setup_thid").is_none());
+        let loaded: TrustRegistry = serde_json::from_value(stored).expect("a record without setup_thid loads");
+        assert_eq!(loaded.setup_thid, None);
+
+        registry.setup_thid = Some("thid-setup".into());
+        let loaded: TrustRegistry =
+            serde_json::from_value(serde_json::to_value(&registry).expect("serialise")).expect("deserialise");
+        assert_eq!(loaded.setup_thid.as_deref(), Some("thid-setup"));
     }
 
     /// Some trust registries return only the decision boolean on the

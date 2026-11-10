@@ -182,6 +182,8 @@ pub struct OobConnectionInfo {
     pub mediator_did: String,
     /// The canonical DID of the trust registry (from OOB URL `main_did` query param)
     pub main_did: Option<String>,
+    /// Thread id of the connection-setup message
+    pub setup_thid: Option<String>,
     /// Reports `creation_failed` for `our_did` unless the caller reports `created`
     /// once the registry's record is saved.
     pub announcement: crate::event_hook::CreationGuard,
@@ -212,6 +214,9 @@ pub(crate) struct TrustRegistryConnection {
     pub(crate) main_did: Option<String>,
     /// Mediator DID for routing
     pub(crate) mediator_did: String,
+    /// Thread id of the connection-setup message; a problem report on this
+    /// thread is the registry rejecting the gateway.
+    pub(crate) setup_thid: Option<String>,
     /// Whether this is a temporary connection for querying public registries
     #[allow(dead_code)]
     pub(crate) is_temporary: bool,
@@ -1033,6 +1038,7 @@ impl TrustRegistryListenerManager {
             mediator_url: extras.mediator_url,
             mediator_did: connection.mediator_did,
             main_did: connection.main_did,
+            setup_thid: connection.setup_thid,
             announcement: extras.announcement,
         })
     }
@@ -1061,6 +1067,7 @@ impl TrustRegistryListenerManager {
                 registry_did: format!("did:example:registry-{}", trust_registry_id),
                 main_did: None,
                 mediator_did,
+                setup_thid: Some(format!("setup-{}", trust_registry_id)),
                 is_temporary: false,
                 client,
                 response_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -1155,10 +1162,9 @@ impl TrustRegistryListenerManager {
             "channel_did": our_did,
         });
 
-        let message_id = uuid::Uuid::new_v4().to_string();
         let thread_id = uuid::Uuid::new_v4().to_string();
 
-        let message = DIDCommMessage::build(message_id.clone(), connection::SETUP.to_string(), setup_body)
+        let message = DIDCommMessage::build(thread_id.clone(), connection::SETUP.to_string(), setup_body)
             .from(our_did.clone())
             .to(inviter_did.clone())
             .thid(thread_id.clone())
@@ -1192,6 +1198,7 @@ impl TrustRegistryListenerManager {
             registry_did: inviter_did,
             main_did,
             mediator_did,
+            setup_thid: Some(thread_id),
             is_temporary: false,
             client,
             response_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -1258,6 +1265,7 @@ impl TrustRegistryListenerManager {
             registry_did: registry_did.to_string(),
             main_did: registry.main_did.clone(),
             mediator_did: mediator_did.to_string(),
+            setup_thid: registry.setup_thid.clone(),
             is_temporary: false,
             client,
             response_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -2352,6 +2360,7 @@ impl TrustRegistryListenerManager {
                     registry_did: trust_registry_did.to_string(),
                     main_did: Some(trust_registry_did.to_string()),
                     mediator_did: "did:example:mediator".to_string(),
+                    setup_thid: None,
                     is_temporary: true,
                     client,
                     response_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -2417,6 +2426,7 @@ impl TrustRegistryListenerManager {
             registry_did: trust_registry_did.to_string(),
             main_did: Some(trust_registry_did.to_string()),
             mediator_did,
+            setup_thid: None,
             is_temporary: true,
             client,
             response_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -3214,6 +3224,7 @@ mod tests {
             registry_did: registry_did.to_string(),
             main_did: None,
             mediator_did: "did:example:mediator".to_string(),
+            setup_thid: None,
             is_temporary: false,
             client: super::super::test_builds::offline_client().await,
             response_waiters: empty_waiters(),
@@ -3386,6 +3397,7 @@ mod tests {
     ) -> super::super::types::TrustRegistry {
         let mut registry = stored_registry(Some("did:example:gateway"), Some("did:example:mediator"));
         registry.registry_did = Some(format!("did:example:registry-{}", registry.id));
+        registry.setup_thid = Some(format!("setup-{}", registry.id));
         registry.connection_status = status;
         store
             .create(&registry)
@@ -3734,6 +3746,7 @@ mod tests {
         assert_eq!(connection.trust_registry_id, registry.id);
         assert!(!connection.is_temporary);
         assert_eq!(connection.our_did, "did:example:gateway", "the stored identity is used");
+        assert_eq!(connection.setup_thid, registry.setup_thid, "the stored setup thread is used");
         assert_eq!(super::super::test_builds::calls(&did), 0, "no temporary connection is built");
     }
 
