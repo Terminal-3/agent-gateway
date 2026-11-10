@@ -130,6 +130,20 @@ impl Fixture {
             .expect("parse policy-assignments")
     }
 
+    async fn json(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> serde_json::Value {
+        let resp = request
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), 200);
+        resp.json()
+            .await
+            .expect("parse JSON body")
+    }
+
     async fn persisted_assignments(&self) -> GlobalPolicyAssignments {
         FileSystemGlobalPolicyStore::new(
             self.global_policies_dir
@@ -179,4 +193,22 @@ async fn deleting_unassigned_policy_leaves_global_assignments_unchanged() {
         before
     );
     assert_eq!(f.live_assignments().await, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn updating_a_policy_answers_the_stored_policy_and_a_no_op_keeps_updated_at() {
+    let f = Fixture::start().await;
+    let url = f.api(&format!("policy-definitions/{ALLOW_ALL_POLICY_ID}"));
+    let get = || f.admin.get(&url);
+    let put = |body: &serde_json::Value| f.admin.put(&url).json(body);
+
+    let mut edit = f.json(get()).await;
+    edit["name"] = json!("Renamed");
+    let edited = f.json(put(&edit)).await;
+    assert_eq!(edited, f.json(get()).await);
+    assert_eq!(edited["name"], "Renamed");
+
+    let again = f.json(put(&edited)).await;
+    assert_eq!(again["updated_at"], edited["updated_at"]);
+    assert_eq!(again, f.json(get()).await);
 }
