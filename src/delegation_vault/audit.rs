@@ -464,6 +464,10 @@ pub enum DelegationAuditAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         object: Option<serde_json::Value>,
     },
+    /// Every id of `kind` the gateway has, sent after the `config_object`
+    /// records of a full pass, so a reader can drop the objects removed while
+    /// no record could be sent (gateway stopped, audit off).
+    FullConfig { kind: String, ids: Vec<String> },
     /// TRQP trust-check outcome. `authority_id` / `entity_id` are
     /// `Option<String>` and omitted from the JSONL on the target-leg
     /// "unavailable" pre-check paths (`AGENT_CARD_UNAVAILABLE`,
@@ -1405,7 +1409,7 @@ pub fn action_category(action: &DelegationAuditAction) -> &'static str {
     match action {
         DelegationAuditAction::PolicyDecision { .. } => "policy_decision",
         DelegationAuditAction::TrustCheck { .. } => "trust_check",
-        DelegationAuditAction::ConfigObject { .. } => "config_object",
+        DelegationAuditAction::ConfigObject { .. } | DelegationAuditAction::FullConfig { .. } => "config_object",
         DelegationAuditAction::TraceTerminated { .. } => "trace_terminated",
         DelegationAuditAction::ConsentGranted => "consent_granted",
         DelegationAuditAction::TokenInjected => "token_injected",
@@ -1689,6 +1693,38 @@ pub fn audit_config_object(
             id: id.to_string(),
             object,
         },
+        agent_did: None,
+        agent_identity_did: None,
+        user_identity_hash: None,
+        provider_id: None,
+        provider_name: None,
+        surface_id: None,
+        channel_name: None,
+        target_endpoint: None,
+        protocol: None,
+        scopes: None,
+        token_id: None,
+        inject_as: None,
+        via_fabric: false,
+        caller: None,
+        mcp_tool_name: None,
+        vp_jwt: None,
+        vp_fingerprint: None,
+        trace_id: None,
+        request_id: None,
+        surface_variant: None,
+        detail: None,
+    });
+}
+
+pub fn audit_full_config(
+    kind: &str,
+    ids: Vec<String>,
+) {
+    emit("config_object", || DelegationAuditEvent {
+        event_id: new_event_id(),
+        timestamp: Utc::now().to_rfc3339(),
+        event: DelegationAuditAction::FullConfig { kind: kind.to_string(), ids },
         agent_did: None,
         agent_identity_did: None,
         user_identity_hash: None,

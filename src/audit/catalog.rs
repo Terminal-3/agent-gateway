@@ -81,7 +81,7 @@ pub const AUDIT_EVENTS: &[AuditEventSpec] = &[
     event(
         "config_object",
         "Config Object",
-        "A surface, policy or trust registry as configured, at start and on each change",
+        "A surface, policy or trust registry as configured, at start and on each change, and the full id list after each full pass",
         Policies,
     ),
     event("trace_terminated", "Trace Terminated", "A surface terminated the end-to-end trace at its egress", Trace),
