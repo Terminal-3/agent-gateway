@@ -2604,6 +2604,7 @@ async fn enrich_and_evaluate_surface_policies(
     mcp_binding: Option<&crate::surface_context::IdentityBindingContext>,
     peer_issuers: &crate::gateways::types::PeerIssuers,
     mcp_context: Option<&crate::surface_context::McpContext>,
+    a2a_method: Option<&str>,
 ) -> Result<bytes::Bytes, ForwardRefusal> {
     // Caller-leg Trust Check stage runs further down (post-identity);
     // gateway OPA on GW2 already ran in `evaluate_gateway_policy_for_fabric`
@@ -2827,16 +2828,15 @@ async fn enrich_and_evaluate_surface_policies(
                     crate::config::ChannelProtocol::A2a | crate::config::ChannelProtocol::Ap2
                 ) && let Some(body) = body_json.as_ref()
                 {
-                    let a2a_method = body
-                        .get("method")
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string());
                     let message = body
                         .get("params")
                         .and_then(|p| p.get("message"))
                         .or_else(|| body.get("message"))
                         .cloned();
-                    probe_input.a2a = Some(crate::surface_context::A2aContext::new(a2a_method, message));
+                    probe_input.a2a = Some(crate::surface_context::A2aContext::new(
+                        a2a_method.map(str::to_string),
+                        message,
+                    ));
                 }
                 probe_input.normalize_caller_did();
                 let probe_value = serde_json::to_value(&probe_input).unwrap_or_default();
@@ -3086,16 +3086,12 @@ async fn enrich_and_evaluate_surface_policies(
             crate::config::ChannelProtocol::A2a | crate::config::ChannelProtocol::Ap2
         ) && let Some(body) = body_ref
         {
-            let a2a_method = body
-                .get("method")
-                .and_then(|m| m.as_str())
-                .map(|s| s.to_string());
             let message = body
                 .get("params")
                 .and_then(|p| p.get("message"))
                 .or_else(|| body.get("message"))
                 .cloned();
-            policy_input.a2a = Some(crate::surface_context::A2aContext::new(a2a_method, message));
+            policy_input.a2a = Some(crate::surface_context::A2aContext::new(a2a_method.map(str::to_string), message));
         }
         policy_input.normalize_caller_did();
         let input_value = serde_json::to_value(&policy_input).unwrap_or_default();
@@ -5320,6 +5316,7 @@ async fn process_forward_request_in_request_scope(
         mcp_verified_binding.as_ref(),
         &peer_issuers,
         policy_mcp_context.as_ref(),
+        a2a_method.as_deref(),
     ))
     .await
     {
@@ -10103,6 +10100,7 @@ mod tests {
             None,
             &peer_issuers,
             None,
+            Some("message/send"),
         )))
         .await;
         let decisions = events

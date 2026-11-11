@@ -837,11 +837,15 @@ Every decision record names its surface and its policy:
   request: `a2a`, `ap2`, `mcp` or `didcomm` for a surface (on the access point and Fabric flows),
   `a2a`, `ap2`, `mcp` or `http` for a Transit Point.
 - `mcp_tool_name` (top level) names the tool the request calls: the tool of an MCP `tools/call`,
-  or the JSON-RPC method of an A2A or AP2 request exactly as the caller sent it (`SendMessage`,
-  `message/send`). Every decision on the request carries it, response decisions included, except
-  `mcp_tool_list` decisions. It is absent when the request names no tool: an MCP `initialize`,
-  `tools/list` or notification, a `tools/call` without a readable tool name, a request without a
-  JSON-RPC `method`, or any request to an `http` Transit Point.
+  or the JSON-RPC method of an A2A or AP2 request. A method the gateway recognises in either A2A
+  era is recorded in its v0.3 slash form, the same form as `input.a2a.method_canonical`, so v1.0
+  `SendMessage` and v0.3 `message/send` are both `message/send`; any other method is recorded as
+  the caller sent it. Every decision on the request carries it, response decisions included,
+  except `mcp_tool_list` decisions. It is absent when the request names no tool: an MCP
+  `initialize`, `tools/list` or notification, a `tools/call` without a readable tool name, a
+  request without a top-level JSON-RPC `method` (such as a batch), or any request to an `http`
+  Transit Point. A tool name or method longer than 128 bytes, including a tool a decision names
+  itself, is cut to 128 bytes at a UTF-8 character boundary.
 - A decision recorded before the gateway has read the request has neither field.
 - `request_id` identifies the gateway request the decision belongs to; one request yields a
   decision per policy layer, all with the same `request_id` (see

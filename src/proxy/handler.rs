@@ -18091,7 +18091,8 @@ allow if {
 
     /// A streamed response is read after the handler returned. The records its
     /// events write (here, the response-policy allow recorded on the first
-    /// event) still carry the request's id, the one its other records carry.
+    /// event) still carry the request's id, the one its other records carry,
+    /// and name the request's protocol and called method.
     async fn streamed_response_records_carry_the_request_id(state: &crate::state::ProxyState) {
         use serde_json::json;
         use std::sync::Arc;
@@ -18176,21 +18177,18 @@ allow if {
         })
         .await;
 
-        let streamed_decisions = events
+        let streamed_decisions: Vec<_> = events
             .iter()
             .filter(|event| {
                 matches!(&event.event, crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision {
                     scope, ..
                 } if scope == crate::observability::PolicyScope::Response.as_str())
             })
-            .count();
-        assert_eq!(streamed_decisions, 1, "the allow is recorded once per stream: {events:?}\n{body:?}");
-        let decision = events
-            .iter()
-            .find(|event| {
-                matches!(&event.event, crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision { .. })
-            })
-            .unwrap();
+            .collect();
+        assert_eq!(streamed_decisions.len(), 1, "the allow is recorded once per stream: {events:?}\n{body:?}");
+        let decision = streamed_decisions[0];
+        assert_eq!(decision.protocol.as_deref(), Some("a2a"));
+        assert_eq!(decision.mcp_tool_name.as_deref(), Some("message/stream"));
         assert_eq!(
             decision
                 .channel_name
@@ -18212,8 +18210,9 @@ allow if {
 
     /// The surface decision on an Access Point request names the surface's
     /// protocol and the tool the request calls: the MCP tool of a
-    /// `tools/call`, the A2A method as the caller sent it, and no tool for an
-    /// MCP `tools/list`.
+    /// `tools/call`, a recognised A2A method in its canonical slash form, an
+    /// unrecognised one as sent, and no tool for an MCP `tools/list`. A tool
+    /// or method longer than 128 bytes is cut at a character boundary.
     async fn access_point_decisions_name_the_protocol_and_the_tool(state: &crate::state::ProxyState) {
         use serde_json::json;
         use std::sync::Arc;
@@ -18239,11 +18238,16 @@ allow if {
             )
             .await
             .unwrap();
+        let long_tool = format!("{}é{}", "a".repeat(127), "z".repeat(600));
+        let long_method = format!("vendor/{}", "m".repeat(600));
         let cases = [
             ("a2a", json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
-                "message": {"messageId": "m-1", "role": "ROLE_USER", "parts": [{"text": "hi"}]}}}), Some("SendMessage")),
+                "message": {"messageId": "m-1", "role": "ROLE_USER", "parts": [{"text": "hi"}]}}}), Some("message/send")),
+            ("a2a", json!({"jsonrpc": "2.0", "id": 1, "method": long_method, "params": {}}), Some(&long_method[..128])),
             ("mcp", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "search", "arguments": {}}}), Some("search")),
+            ("mcp", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": long_tool, "arguments": {}}}), Some(&long_tool[..127])),
             ("mcp", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}), None),
         ];
         for (protocol, body, tool) in cases {

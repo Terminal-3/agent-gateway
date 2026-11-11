@@ -205,6 +205,17 @@ pub fn set_request_call(
     });
 }
 
+/// Longest tool name, in bytes, a policy decision records. Tool names and
+/// unrecognised A2A methods are caller-supplied, and tee:gateway refuses a
+/// record whose `mcp_tool_name` exceeds 512 bytes. The MCP specification
+/// recommends tool names of 1 to 128 ASCII characters.
+const MAX_RECORDED_TOOL_BYTES: usize = 128;
+
+/// `name` cut to [`MAX_RECORDED_TOOL_BYTES`] at a UTF-8 character boundary.
+fn recorded_tool_name(name: &str) -> &str {
+    &name[..name.floor_char_boundary(MAX_RECORDED_TOOL_BYTES)]
+}
+
 fn current_request_call() -> Option<RequestCall> {
     REQUEST
         .try_with(|scope| scope.call.get().cloned())
@@ -508,7 +519,7 @@ pub struct PolicyDecisionEvent<'a> {
     pub policy_content_hash: Option<&'a str>,
     /// The tool the decision is about. When `None`, the decision names the
     /// tool its request calls (see [`set_request_call`]), except on scope
-    /// `McpToolList`.
+    /// `McpToolList`. Either is recorded cut to [`MAX_RECORDED_TOOL_BYTES`].
     pub mcp_tool_name: Option<&'a str>,
     pub target_did: Option<&'a str>,
     pub target_claim: Option<(&'a str, &'a str)>,
@@ -640,7 +651,8 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             call.as_ref()
                 .filter(|_| event.scope != PolicyScope::McpToolList)
                 .and_then(|call| call.tool.as_deref())
-        });
+        })
+        .map(recorded_tool_name);
     let target_did = event
         .target_did
         .unwrap_or_default();
@@ -1633,7 +1645,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_decision_names_the_protocol_and_the_tool_its_request_calls() {
-        for (protocol, tool) in [("mcp", "search"), ("a2a", "SendMessage"), ("ap2", "message/send")] {
+        for (protocol, tool) in [("mcp", "search"), ("a2a", "message/send"), ("ap2", "tasks/get")] {
             let rows = decisions_in_a_call(protocol, Some(tool)).await;
             assert_eq!(rows.len(), 5, "{rows:?}");
             for row in &rows {
@@ -1688,7 +1700,7 @@ mod tests {
     async fn a_decision_keeps_the_tool_it_names_itself() {
         let ((), events) = crate::audit::producer::capture(in_request(RequestScope::fresh(), async {
             set_request_call("mcp", Some("search"));
-            set_request_call("a2a", Some("SendMessage"));
+            set_request_call("a2a", Some("message/send"));
             record_policy_decision(PolicyDecisionEvent {
                 scope: PolicyScope::McpTool,
                 allow: false,
@@ -1701,6 +1713,34 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].protocol.as_deref(), Some("mcp"), "the first call set is kept");
         assert_eq!(events[0].mcp_tool_name.as_deref(), Some("delete_repo"));
+    }
+
+    #[tokio::test]
+    async fn a_decision_records_a_long_tool_name_cut_at_a_character_boundary() {
+        let method = "m".repeat(600);
+        let straddling = format!("{}é{}", "a".repeat(127), "z".repeat(600));
+        let whole = "w".repeat(MAX_RECORDED_TOOL_BYTES);
+        let ((), events) = crate::audit::producer::capture(in_request(RequestScope::fresh(), {
+            let (method, straddling, whole) = (method.clone(), straddling.clone(), whole.clone());
+            async move {
+                set_request_call("a2a", Some(&method));
+                for tool in [None, Some(straddling.as_str()), Some(whole.as_str())] {
+                    record_policy_decision(PolicyDecisionEvent {
+                        scope: PolicyScope::McpTool,
+                        allow: false,
+                        mcp_tool_name: tool,
+                        ..Default::default()
+                    });
+                }
+            }
+        }))
+        .await;
+
+        let recorded: Vec<_> = events
+            .iter()
+            .map(|event| event.mcp_tool_name.as_deref())
+            .collect();
+        assert_eq!(recorded, [Some(&method[..128]), Some(&straddling[..127]), Some(whole.as_str())]);
     }
 
     /// The protocol and tool on a gateway decision recorded where this runs.
@@ -1721,7 +1761,7 @@ mod tests {
     async fn a_request_served_inside_another_names_only_its_own_call() {
         let call = |protocol: &str, tool: &str| (Some(protocol.to_string()), Some(tool.to_string()));
         let (inner_unset, inner, outer) = in_request(RequestScope::fresh(), async {
-            set_request_call("a2a", Some("SendMessage"));
+            set_request_call("a2a", Some("message/send"));
             let (inner_unset, inner) = in_request(RequestScope::fresh(), async {
                 let unset = recorded_call().await;
                 set_request_call("mcp", Some("search"));
@@ -1734,7 +1774,7 @@ mod tests {
 
         assert_eq!(inner_unset, (None, None));
         assert_eq!(inner, call("mcp", "search"));
-        assert_eq!(outer, call("a2a", "SendMessage"));
+        assert_eq!(outer, call("a2a", "message/send"));
     }
 
     #[tokio::test]

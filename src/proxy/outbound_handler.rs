@@ -3357,13 +3357,16 @@ fn outbound_target_claim(ctx: &OutboundPipelineContext) -> Option<(&str, &str)> 
 }
 
 /// The tool a Transit Point call names on its policy decision records: the
-/// tool of an MCP `tools/call`, or the JSON-RPC method of an A2A or AP2 call as
-/// the managed agent sent it.
+/// tool of an MCP `tools/call`, or the JSON-RPC method of an A2A or AP2 call,
+/// in its canonical v0.3 slash form when the method is recognised in either
+/// era and as the managed agent sent it otherwise.
 fn outbound_called_tool(ctx: &OutboundPipelineContext) -> Option<String> {
     match ctx.virtual_channel.protocol {
-        crate::config::agent_surface::TransitProtocol::A2a | crate::config::agent_surface::TransitProtocol::Ap2 => {
-            ctx.operation.clone()
-        }
+        crate::config::agent_surface::TransitProtocol::A2a | crate::config::agent_surface::TransitProtocol::Ap2 => ctx
+            .operation
+            .as_deref()
+            .map(crate::a2a::canonical_method)
+            .map(str::to_string),
         crate::config::agent_surface::TransitProtocol::Mcp => ctx
             .body_bytes
             .as_deref()
@@ -9228,11 +9231,20 @@ mod tests {
     #[tokio::test]
     async fn transit_point_decisions_name_the_point_protocol_and_the_tool() {
         let tools_call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search"}});
+        let long_tool = format!("{}é{}", "a".repeat(127), "z".repeat(600));
+        let long_method = format!("vendor/{}", "m".repeat(600));
         let cases = [
-            ("a2a", "mcp", tools_call.clone(), Some("search")),
+            ("a2a", "mcp", tools_call.clone(), Some("search".to_string())),
             ("a2a", "mcp", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}), None),
-            ("mcp", "a2a", json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {}}), Some("SendMessage")),
-            ("mcp", "ap2", json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}), Some("message/send")),
+            (
+                "a2a",
+                "mcp",
+                json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": long_tool}}),
+                Some("a".repeat(127)),
+            ),
+            ("mcp", "a2a", json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {}}), Some("message/send".to_string())),
+            ("mcp", "ap2", json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}), Some("message/send".to_string())),
+            ("mcp", "a2a", json!({"jsonrpc": "2.0", "id": 1, "method": long_method, "params": {}}), Some(long_method[..128].to_string())),
             ("mcp", "http", tools_call, None),
         ];
         for (surface_protocol, point_protocol, body, tool) in cases {
@@ -9277,7 +9289,7 @@ mod tests {
             assert!(!decisions.is_empty(), "{point_protocol} {body}: {events:?}");
             for decision in decisions {
                 assert_eq!(decision.protocol.as_deref(), Some(point_protocol), "{body}");
-                assert_eq!(decision.mcp_tool_name.as_deref(), tool, "{point_protocol} {body}");
+                assert_eq!(decision.mcp_tool_name, tool, "{point_protocol} {body}");
             }
         }
     }
@@ -15424,8 +15436,10 @@ mod tests {
 
         assert_eq!(call(TransitProtocol::Mcp, tools_call.clone()).as_deref(), Some("search"));
         assert_eq!(call(TransitProtocol::Mcp, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})), None);
-        assert_eq!(call(TransitProtocol::A2a, send.clone()).as_deref(), Some("SendMessage"));
-        assert_eq!(call(TransitProtocol::Ap2, send.clone()).as_deref(), Some("SendMessage"));
+        assert_eq!(call(TransitProtocol::A2a, send.clone()).as_deref(), Some("message/send"));
+        assert_eq!(call(TransitProtocol::Ap2, send.clone()).as_deref(), Some("message/send"));
+        let custom = json!({"jsonrpc": "2.0", "id": 1, "method": "vendor/custom", "params": {}});
+        assert_eq!(call(TransitProtocol::A2a, custom).as_deref(), Some("vendor/custom"));
         assert_eq!(call(TransitProtocol::Http, tools_call), None);
     }
 

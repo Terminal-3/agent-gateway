@@ -7,11 +7,14 @@ changes:
         A policy_decision record now carries protocol, the configured protocol of the surface or
         Transit Point serving the request (a2a, ap2, mcp, didcomm or http), and mcp_tool_name on
         every scope, not only MCP tool decisions: the tool of an MCP tools/call, or the JSON-RPC
-        method of an A2A or AP2 request as the caller sent it. Gateway, surface, response and
-        MCP tool decisions on the access point, Transit Point and Fabric flows all carry them, so
-        a consumer can tell which call each allowed or denied decision was about. MCP initialize,
-        tools/list and notifications, and mcp_tool_list decisions, name no tool. The policy_audit
-        log line carries both too.
+        method of an A2A or AP2 request, in its v0.3 slash form when the method is a recognised
+        A2A method in either era (SendMessage and message/send are both message/send) and as the
+        caller sent it otherwise. Gateway, surface, response and MCP tool decisions on the access
+        point, Transit Point and Fabric flows all carry them, so a consumer can tell which call
+        each allowed or denied decision was about. MCP initialize, tools/list and notifications,
+        and mcp_tool_list decisions, name no tool. A recorded tool name or method is cut to 128
+        bytes at a character boundary, so a caller cannot send a name long enough to make a
+        record unacceptable to its consumer. The policy_audit log line carries both too.
   changed: []
   fixed: []
   removed: []

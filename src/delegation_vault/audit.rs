@@ -160,7 +160,8 @@ pub struct DelegationAuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller: Option<AuditCallerContext>,
     /// The tool the record is about: the MCP tool of a `tools/call`, or, on a
-    /// policy decision for an A2A or AP2 request, its JSON-RPC method
+    /// policy decision for an A2A or AP2 request, its JSON-RPC method (see
+    /// [`crate::surface_context::called_tool`])
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_tool_name: Option<String>,
     /// VP JWT injected into the upstream response (if identity VP was sent)
@@ -2661,7 +2662,7 @@ mod tests {
             )
         };
         let ((), events) = crate::audit::producer::capture(async {
-            decide(Some("ap2"), Some("SendMessage"));
+            decide(Some("ap2"), Some("message/send"));
             decide(None, None);
         })
         .await;
@@ -2669,7 +2670,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         let row = serde_json::to_value(&events[0]).unwrap();
         assert_eq!(row["protocol"], "ap2");
-        assert_eq!(row["mcp_tool_name"], "SendMessage");
+        assert_eq!(row["mcp_tool_name"], "message/send");
         let again: DelegationAuditEvent = serde_json::from_value(row).expect("deserialize record");
         assert_eq!(again.protocol.as_deref(), Some("ap2"));
         let row = serde_json::to_value(&events[1]).unwrap();
