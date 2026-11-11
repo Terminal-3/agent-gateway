@@ -106,12 +106,21 @@ tokio::task_local! {
 }
 
 /// One gateway request: its id, minted here and never read from a header or
-/// token, and the surface variant routing resolved it to, set once routing
-/// knows it.
+/// token, the surface variant routing resolved it to, set once routing knows
+/// it, and what it calls, set once its body is read.
 #[derive(Debug)]
 pub struct RequestScope {
     id: String,
     variant: std::sync::OnceLock<String>,
+    call: std::sync::OnceLock<RequestCall>,
+}
+
+/// What a request calls: the protocol of the surface or Transit Point serving
+/// it, and the tool it names, if any.
+#[derive(Debug, Clone)]
+struct RequestCall {
+    protocol: &'static str,
+    tool: Option<String>,
 }
 
 impl RequestScope {
@@ -120,6 +129,7 @@ impl RequestScope {
         Arc::new(Self {
             id,
             variant: std::sync::OnceLock::new(),
+            call: std::sync::OnceLock::new(),
         })
     }
 
@@ -170,6 +180,34 @@ pub fn set_request_variant(variant: &str) {
 pub fn current_request_variant() -> Option<String> {
     REQUEST
         .try_with(|scope| scope.variant.get().cloned())
+        .ok()
+        .flatten()
+}
+
+/// Records what the request being served calls: `protocol`, the serialised
+/// protocol of the surface or Transit Point serving it, and `tool`, the tool
+/// it names (see [`crate::surface_context::called_tool`]). Every policy
+/// decision the request records carries both. The first call set is kept.
+/// Does nothing outside a request.
+pub fn set_request_call(
+    protocol: &'static str,
+    tool: Option<&str>,
+) {
+    let _ = REQUEST.try_with(|scope| {
+        scope
+            .call
+            .set(RequestCall {
+                protocol,
+                tool: tool
+                    .filter(|tool| !tool.is_empty())
+                    .map(str::to_string),
+            })
+    });
+}
+
+fn current_request_call() -> Option<RequestCall> {
+    REQUEST
+        .try_with(|scope| scope.call.get().cloned())
         .ok()
         .flatten()
 }
@@ -468,6 +506,9 @@ pub struct PolicyDecisionEvent<'a> {
     pub policy_version: Option<u32>,
     /// `sha256:<hex>` content hash of the exact Rego enforced (attestation).
     pub policy_content_hash: Option<&'a str>,
+    /// The tool the decision is about. When `None`, the decision names the
+    /// tool its request calls (see [`set_request_call`]), except on scope
+    /// `McpToolList`.
     pub mcp_tool_name: Option<&'a str>,
     pub target_did: Option<&'a str>,
     pub target_claim: Option<(&'a str, &'a str)>,
@@ -588,9 +629,18 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
         .unwrap_or_default();
     let policy_name = decision_policy_name(&event);
     let surface_variant = current_request_variant();
+    let call = current_request_call();
+    let protocol = call
+        .as_ref()
+        .map(|call| call.protocol);
     let mcp_tool_name = event
         .mcp_tool_name
-        .unwrap_or_default();
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            call.as_ref()
+                .filter(|_| event.scope != PolicyScope::McpToolList)
+                .and_then(|call| call.tool.as_deref())
+        });
     let target_did = event
         .target_did
         .unwrap_or_default();
@@ -616,7 +666,8 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             trace_id = trace_id,
             policy_version = policy_version_str.as_str(),
             policy_content_hash = policy_content_hash,
-            mcp_tool_name = mcp_tool_name,
+            protocol = protocol.unwrap_or_default(),
+            mcp_tool_name = mcp_tool_name.unwrap_or_default(),
             target_did = target_did,
             "policy decision: allow"
         );
@@ -641,7 +692,8 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             trace_id = trace_id,
             policy_version = policy_version_str.as_str(),
             policy_content_hash = policy_content_hash,
-            mcp_tool_name = mcp_tool_name,
+            protocol = protocol.unwrap_or_default(),
+            mcp_tool_name = mcp_tool_name.unwrap_or_default(),
             target_did = target_did,
             "policy decision: {decision}"
         );
@@ -690,9 +742,8 @@ pub fn record_policy_decision(event: PolicyDecisionEvent<'_>) {
             event.policy_content_hash,
             decision_caller(&event),
             event.removed_tools,
-            event
-                .mcp_tool_name
-                .filter(|name| !name.is_empty()),
+            protocol,
+            mcp_tool_name,
             event
                 .target_did
                 .filter(|did| !did.is_empty()),
@@ -1554,5 +1605,101 @@ mod tests {
 
         assert_eq!(field(ev, "caller_auth_method"), Some("did_auth"));
         assert_eq!(field(ev, "caller_did"), Some("did:example:caller"));
+    }
+
+    /// Records one decision of each scope in a request that calls `tool` on
+    /// a `protocol` surface, and returns the record rows.
+    async fn decisions_in_a_call(
+        protocol: &'static str,
+        tool: Option<&'static str>,
+    ) -> Vec<serde_json::Value> {
+        let ((), events) = crate::audit::producer::capture(in_request(RequestScope::fresh(), async move {
+            set_request_call(protocol, tool);
+            for scope in [PolicyScope::Gateway, PolicyScope::Surface, PolicyScope::McpTool, PolicyScope::Response] {
+                record_policy_decision(PolicyDecisionEvent {
+                    scope,
+                    allow: true,
+                    ..Default::default()
+                });
+            }
+            record_tools_list_filtering(&names(&["search", "drop_table"]), &names(&["search"]), PolicyDecisionEvent::default());
+        }))
+        .await;
+        events
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_decision_names_the_protocol_and_the_tool_its_request_calls() {
+        for (protocol, tool) in [("mcp", "search"), ("a2a", "SendMessage"), ("ap2", "message/send")] {
+            let rows = decisions_in_a_call(protocol, Some(tool)).await;
+            assert_eq!(rows.len(), 5, "{rows:?}");
+            for row in &rows {
+                assert_eq!(row["protocol"], protocol, "{row}");
+                let scope = row["event"]["policy_decision"]["scope"].as_str();
+                if scope == Some(PolicyScope::McpToolList.as_str()) {
+                    assert!(row.get("mcp_tool_name").is_none(), "{row}");
+                } else {
+                    assert_eq!(row["mcp_tool_name"], tool, "{row}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_that_calls_no_tool_records_only_its_protocol() {
+        let rows = decisions_in_a_call("mcp", None).await;
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        for row in &rows {
+            assert_eq!(row["protocol"], "mcp", "{row}");
+            assert!(row.get("mcp_tool_name").is_none(), "{row}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decision_before_the_call_is_known_names_no_protocol_or_tool() {
+        let ((), events) = crate::audit::producer::capture(async {
+            record_policy_decision(PolicyDecisionEvent {
+                scope: PolicyScope::Gateway,
+                allow: true,
+                ..Default::default()
+            });
+            in_request(RequestScope::fresh(), async {
+                record_policy_decision(PolicyDecisionEvent {
+                    scope: PolicyScope::Gateway,
+                    allow: true,
+                    ..Default::default()
+                });
+            })
+            .await;
+        })
+        .await;
+
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            assert_eq!(event.protocol, None);
+            assert_eq!(event.mcp_tool_name, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_decision_keeps_the_tool_it_names_itself() {
+        let ((), events) = crate::audit::producer::capture(in_request(RequestScope::fresh(), async {
+            set_request_call("mcp", Some("search"));
+            set_request_call("a2a", Some("SendMessage"));
+            record_policy_decision(PolicyDecisionEvent {
+                scope: PolicyScope::McpTool,
+                allow: false,
+                mcp_tool_name: Some("delete_repo"),
+                ..Default::default()
+            });
+        }))
+        .await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].protocol.as_deref(), Some("mcp"), "the first call set is kept");
+        assert_eq!(events[0].mcp_tool_name.as_deref(), Some("delete_repo"));
     }
 }

@@ -934,6 +934,12 @@ async fn outbound_proxy_handler_in_request_scope(
     if let Some(response) = step_extract_protocol_context_with_versions(&state, &mut ctx, versions).await? {
         return Ok(response);
     }
+    crate::observability::policy_audit::set_request_call(
+        ctx.virtual_channel
+            .protocol
+            .as_str(),
+        outbound_called_tool(&ctx).as_deref(),
+    );
 
     if let Some(crate::mcp::request_validation::McpRequestClassification::Modern(_)) = ctx
         .mcp_classification
@@ -3348,6 +3354,22 @@ fn outbound_target_claim(ctx: &OutboundPipelineContext) -> Option<(&str, &str)> 
     ctx.target_identity_claim
         .as_ref()
         .map(|(claim, value)| (claim.as_str(), value.as_str()))
+}
+
+/// The tool a Transit Point call names on its policy decision records: the
+/// tool of an MCP `tools/call`, or the JSON-RPC method of an A2A or AP2 call as
+/// the managed agent sent it.
+fn outbound_called_tool(ctx: &OutboundPipelineContext) -> Option<String> {
+    match ctx.virtual_channel.protocol {
+        crate::config::agent_surface::TransitProtocol::A2a | crate::config::agent_surface::TransitProtocol::Ap2 => {
+            ctx.operation.clone()
+        }
+        crate::config::agent_surface::TransitProtocol::Mcp => ctx
+            .body_bytes
+            .as_deref()
+            .and_then(crate::mcp::tool_analyzer::called_tool_name),
+        crate::config::agent_surface::TransitProtocol::Http => None,
+    }
 }
 
 /// The caller of a Transit Point call, for attributing outbound decisions: the
@@ -15325,6 +15347,29 @@ mod tests {
             Some("message/send"),
             "policy `input.a2a.method` must resolve on the transit-point leg"
         );
+    }
+
+    #[test]
+    fn a_transit_point_call_names_the_tool_its_protocol_reads() {
+        use crate::config::agent_surface::TransitProtocol;
+
+        let call = |protocol: TransitProtocol, body: serde_json::Value| {
+            let mut ctx = test_pipeline_context();
+            ctx.virtual_channel.protocol = protocol;
+            ctx.operation = body["method"]
+                .as_str()
+                .map(str::to_string);
+            ctx.body_bytes = Some(Bytes::from(serde_json::to_vec(&body).unwrap()));
+            outbound_called_tool(&ctx)
+        };
+        let tools_call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search"}});
+        let send = json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {}});
+
+        assert_eq!(call(TransitProtocol::Mcp, tools_call.clone()).as_deref(), Some("search"));
+        assert_eq!(call(TransitProtocol::Mcp, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})), None);
+        assert_eq!(call(TransitProtocol::A2a, send.clone()).as_deref(), Some("SendMessage"));
+        assert_eq!(call(TransitProtocol::Ap2, send.clone()).as_deref(), Some("SendMessage"));
+        assert_eq!(call(TransitProtocol::Http, tools_call), None);
     }
 
     #[test]

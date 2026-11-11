@@ -484,6 +484,20 @@ impl A2aContext {
     }
 }
 
+/// The tool a request names on its policy decision records: the tool of an
+/// MCP `tools/call`, else the method of an A2A or AP2 request exactly as the
+/// caller sent it. Any other MCP request, such as `initialize`, `tools/list`
+/// or a notification, names no tool.
+pub fn called_tool<'a>(
+    mcp: Option<&'a McpContext>,
+    a2a: Option<&'a A2aContext>,
+) -> Option<&'a str> {
+    match mcp {
+        Some(mcp) => mcp.called_tool_name(),
+        None => a2a.and_then(|a2a| a2a.method.as_deref()),
+    }
+}
+
 fn is_false(v: &bool) -> bool {
     !*v
 }
@@ -954,6 +968,28 @@ mod tests {
             .called_tool_name(),
             None
         );
+    }
+
+    #[test]
+    fn called_tool_is_the_mcp_tool_or_the_a2a_method_as_sent() {
+        let mcp = |method: &str| McpContext {
+            method: method.to_string(),
+            tool_name: Some("search".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(called_tool(Some(&mcp("tools/call")), None), Some("search"));
+        let a2a = A2aContext::new(Some("tools/call".to_string()), None);
+        for setup in ["initialize", "tools/list", "notifications/initialized"] {
+            assert_eq!(called_tool(Some(&mcp(setup)), None), None, "{setup}");
+            assert_eq!(called_tool(Some(&mcp(setup)), Some(&a2a)), None, "{setup}");
+        }
+
+        for method in ["SendMessage", "message/send"] {
+            let a2a = A2aContext::new(Some(method.to_string()), None);
+            assert_eq!(called_tool(None, Some(&a2a)), Some(method));
+        }
+        assert_eq!(called_tool(None, Some(&A2aContext::new(None, None))), None);
+        assert_eq!(called_tool(None, None), None);
     }
 
     #[test]

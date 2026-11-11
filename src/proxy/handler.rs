@@ -2649,6 +2649,14 @@ async fn proxy_handler_with_mcp_runtime(
     } else {
         None
     };
+    crate::observability::policy_audit::set_request_call(
+        state
+            .surface
+            .access_point
+            .protocol
+            .as_str(),
+        crate::surface_context::called_tool(mcp_context.as_ref(), a2a_context.as_ref()),
+    );
 
     // For MCP `tools/call`, qualify the operation with the actual tool
     // name so the monitoring "Tool/Operation Distribution" table shows a
@@ -18197,6 +18205,73 @@ allow if {
         );
     }
 
+    /// The surface decision on an Access Point request names the surface's
+    /// protocol and the tool the request calls: the MCP tool of a
+    /// `tools/call`, the A2A method as the caller sent it, and no tool for an
+    /// MCP `tools/list`.
+    async fn access_point_decisions_name_the_protocol_and_the_tool(state: &crate::state::ProxyState) {
+        use serde_json::json;
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let policies = Arc::new(
+            crate::policies::policy_definitions::FileSystemPolicyDefinitionStore::new(
+                directory
+                    .path()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .await
+            .unwrap(),
+        );
+        policies
+            .save(
+                serde_json::from_value(json!({
+                    "id": "allow-calls", "name": "Allow calls", "policy_type": "agent_surface",
+                    "policy": "package surface.policy\ndefault allow = true", "created_at": "2026-11-11T00:00:00Z"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cases = [
+            ("a2a", json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
+                "message": {"messageId": "m-1", "role": "ROLE_USER", "parts": [{"text": "hi"}]}}}), Some("SendMessage")),
+            ("mcp", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "search", "arguments": {}}}), Some("search")),
+            ("mcp", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}), None),
+        ];
+        for (protocol, body, tool) in cases {
+            let surface: crate::config::agent_surface::AgentSurface = serde_json::from_value(json!({
+                "surface_id": format!("calls-{protocol}"), "name": "Calls",
+                "access_point": {"listen_address": "https://gateway.example", "route": "/calls", "protocol": protocol},
+                "target": {"endpoint": "http://127.0.0.1:9", "policy": {"policy_definition_id": "allow-calls"}}
+            }))
+            .unwrap();
+            let manager = Arc::new(crate::policies::SurfacePolicyManager::new());
+            manager.set_policy_definition_store(policies.clone());
+            manager
+                .update_channel_policy(&surface)
+                .await
+                .unwrap();
+            let state = crate::state::ProxyState {
+                policy_manager: Some(manager),
+                ..state.clone()
+            };
+            let (status, events) = access_point_records(direct_router_state(&state, surface), "/calls", body.clone()).await;
+            let decision = events
+                .iter()
+                .find(|event| {
+                    matches!(&event.event, crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision {
+                        scope, ..
+                    } if scope == crate::observability::PolicyScope::Surface.as_str())
+                })
+                .unwrap_or_else(|| panic!("{body}: no surface decision ({status}): {events:?}"));
+            assert_eq!(decision.protocol.as_deref(), Some(protocol), "{body}");
+            assert_eq!(decision.mcp_tool_name.as_deref(), tool, "{body}");
+        }
+    }
+
     /// Each refusal the Access Point answers itself is recorded as
     /// `request_rejected` with the status and JSON-RPC code the caller got.
     async fn access_point_records_request_refusals(state: &crate::state::ProxyState) {
@@ -19794,6 +19869,7 @@ allow if {
         access_point_records_request_refusals(&state).await;
         access_point_requests_each_carry_their_own_request_id(&state).await;
         streamed_response_records_carry_the_request_id(&state).await;
+        access_point_decisions_name_the_protocol_and_the_tool(&state).await;
         let now = crate::proxy::credential_delegation::modern::now_secs().unwrap();
         let runtime = negative_cases::continuation_runtime(now, 300);
         let bearer = issuer.sign_jwt_with_gateway_key_typ(&json!({

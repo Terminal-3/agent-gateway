@@ -5028,6 +5028,23 @@ async fn process_forward_request_in_request_scope(
     } else {
         None
     };
+    let call_a2a_context = matches!(
+        surface.access_point.protocol,
+        crate::config::agent_surface::SurfaceProtocol::A2a | crate::config::agent_surface::SurfaceProtocol::Ap2
+    )
+    .then(|| serde_json::from_slice::<Value>(&body_bytes).ok())
+    .flatten()
+    .map(|body| {
+        let method = body
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        crate::surface_context::A2aContext::new(method, None)
+    });
+    crate::observability::policy_audit::set_request_call(
+        surface.access_point.protocol.as_str(),
+        crate::surface_context::called_tool(policy_mcp_context.as_ref(), call_a2a_context.as_ref()),
+    );
     let mut modern_request = match mcp_classification.as_ref() {
         Some(crate::mcp::request_validation::McpRequestClassification::Modern(request)) => Some((**request).clone()),
         _ => None,
