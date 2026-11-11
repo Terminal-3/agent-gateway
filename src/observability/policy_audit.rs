@@ -1702,4 +1702,51 @@ mod tests {
         assert_eq!(events[0].protocol.as_deref(), Some("mcp"), "the first call set is kept");
         assert_eq!(events[0].mcp_tool_name.as_deref(), Some("delete_repo"));
     }
+
+    /// The protocol and tool on a gateway decision recorded where this runs.
+    async fn recorded_call() -> (Option<String>, Option<String>) {
+        let ((), events) = crate::audit::producer::capture(async {
+            record_policy_decision(PolicyDecisionEvent {
+                scope: PolicyScope::Gateway,
+                allow: true,
+                ..Default::default()
+            });
+        })
+        .await;
+        assert_eq!(events.len(), 1);
+        (events[0].protocol.clone(), events[0].mcp_tool_name.clone())
+    }
+
+    #[tokio::test]
+    async fn a_request_served_inside_another_names_only_its_own_call() {
+        let call = |protocol: &str, tool: &str| (Some(protocol.to_string()), Some(tool.to_string()));
+        let (inner_unset, inner, outer) = in_request(RequestScope::fresh(), async {
+            set_request_call("a2a", Some("SendMessage"));
+            let (inner_unset, inner) = in_request(RequestScope::fresh(), async {
+                let unset = recorded_call().await;
+                set_request_call("mcp", Some("search"));
+                (unset, recorded_call().await)
+            })
+            .await;
+            (inner_unset, inner, recorded_call().await)
+        })
+        .await;
+
+        assert_eq!(inner_unset, (None, None));
+        assert_eq!(inner, call("mcp", "search"));
+        assert_eq!(outer, call("a2a", "SendMessage"));
+    }
+
+    #[tokio::test]
+    async fn a_task_spawned_in_a_request_names_the_request_call() {
+        let spawned = in_request(RequestScope::fresh(), async {
+            set_request_call("ap2", Some("message/send"));
+            spawn_in_request(recorded_call())
+                .await
+                .unwrap()
+        })
+        .await;
+
+        assert_eq!(spawned, (Some("ap2".to_string()), Some("message/send".to_string())));
+    }
 }

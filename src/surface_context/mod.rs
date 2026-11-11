@@ -485,16 +485,16 @@ impl A2aContext {
 }
 
 /// The tool a request names on its policy decision records: the tool of an
-/// MCP `tools/call`, else the method of an A2A or AP2 request exactly as the
-/// caller sent it. Any other MCP request, such as `initialize`, `tools/list`
-/// or a notification, names no tool.
+/// MCP `tools/call`, else `a2a_method`, the JSON-RPC method of an A2A or AP2
+/// request exactly as the caller sent it. Any other MCP request, such as
+/// `initialize`, `tools/list` or a notification, names no tool.
 pub fn called_tool<'a>(
     mcp: Option<&'a McpContext>,
-    a2a: Option<&'a A2aContext>,
+    a2a_method: Option<&'a str>,
 ) -> Option<&'a str> {
     match mcp {
         Some(mcp) => mcp.called_tool_name(),
-        None => a2a.and_then(|a2a| a2a.method.as_deref()),
+        None => a2a_method,
     }
 }
 
@@ -978,17 +978,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(called_tool(Some(&mcp("tools/call")), None), Some("search"));
-        let a2a = A2aContext::new(Some("tools/call".to_string()), None);
         for setup in ["initialize", "tools/list", "notifications/initialized"] {
             assert_eq!(called_tool(Some(&mcp(setup)), None), None, "{setup}");
-            assert_eq!(called_tool(Some(&mcp(setup)), Some(&a2a)), None, "{setup}");
+            assert_eq!(called_tool(Some(&mcp(setup)), Some("tools/call")), None, "{setup}");
         }
+        let unnamed = McpContext {
+            method: "tools/call".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(called_tool(Some(&unnamed), None), None);
 
-        for method in ["SendMessage", "message/send"] {
-            let a2a = A2aContext::new(Some(method.to_string()), None);
-            assert_eq!(called_tool(None, Some(&a2a)), Some(method));
+        for method in ["SendMessage", "message/send", "tasks/get"] {
+            assert_eq!(called_tool(None, Some(method)), Some(method));
         }
-        assert_eq!(called_tool(None, Some(&A2aContext::new(None, None))), None);
         assert_eq!(called_tool(None, None), None);
     }
 

@@ -9225,6 +9225,63 @@ mod tests {
         assert_ne!(seen[0], seen[1], "each request has its own id");
     }
 
+    #[tokio::test]
+    async fn transit_point_decisions_name_the_point_protocol_and_the_tool() {
+        let tools_call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search"}});
+        let cases = [
+            ("a2a", "mcp", tools_call.clone(), Some("search")),
+            ("a2a", "mcp", json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}), None),
+            ("mcp", "a2a", json!({"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {}}), Some("SendMessage")),
+            ("mcp", "ap2", json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}), Some("message/send")),
+            ("mcp", "http", tools_call, None),
+        ];
+        for (surface_protocol, point_protocol, body, tool) in cases {
+            let surface: crate::config::agent_surface::AgentSurface = serde_json::from_value(json!({
+                "surface_id": "calls-surface", "name": "Calls surface",
+                "access_point": {"listen_address": "https://gateway.example", "route": "/calls",
+                    "protocol": surface_protocol},
+                "target": {"endpoint": "http://127.0.0.1:1"},
+                "transit": {"opa_policy_definition_id": "def-1", "points": [{"alias": "partner-a",
+                    "protocol": point_protocol, "require_transit_token": false,
+                    "allow_unauthenticated_callers": true, "target_endpoint": "http://127.0.0.1:9"}]}
+            }))
+            .unwrap();
+            let state = test_outbound_state();
+            state
+                .channel_state
+                .write()
+                .unwrap()
+                .surface = Arc::new(surface);
+            let request = Request::builder()
+                .method("POST")
+                .uri("/outbound/calls/partner-a")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let (_, events) = crate::audit::producer::capture(Box::pin(outbound_proxy_handler_with_mcp_versions(
+                "127.0.0.1:12345"
+                    .parse()
+                    .unwrap(),
+                state,
+                request,
+                crate::mcp::request_validation::MODERN_CAPABLE_POLICY,
+            )))
+            .await;
+            let decisions: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(event.event, crate::delegation_vault::audit::DelegationAuditAction::PolicyDecision { .. })
+                })
+                .collect();
+            assert!(!decisions.is_empty(), "{point_protocol} {body}: {events:?}");
+            for decision in decisions {
+                assert_eq!(decision.protocol.as_deref(), Some(point_protocol), "{body}");
+                assert_eq!(decision.mcp_tool_name.as_deref(), tool, "{point_protocol} {body}");
+            }
+        }
+    }
+
     // ── detect_protocol_and_operation ───────────────────────────────────────
 
     #[test]

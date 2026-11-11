@@ -2655,7 +2655,12 @@ async fn proxy_handler_with_mcp_runtime(
             .access_point
             .protocol
             .as_str(),
-        crate::surface_context::called_tool(mcp_context.as_ref(), a2a_context.as_ref()),
+        crate::surface_context::called_tool(
+            mcp_context.as_ref(),
+            a2a_context
+                .as_ref()
+                .and_then(|a2a| a2a.method.as_deref()),
+        ),
     );
 
     // For MCP `tools/call`, qualify the operation with the actual tool

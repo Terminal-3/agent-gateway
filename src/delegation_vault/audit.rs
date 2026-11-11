@@ -141,7 +141,7 @@ pub struct DelegationAuditEvent {
     /// Target endpoint the channel proxies to
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_endpoint: Option<String>,
-    /// Protocol of the channel (a2a, mcp, etc.)
+    /// Protocol of the surface or Transit Point (a2a, ap2, mcp, didcomm, http)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     /// OAuth scopes involved
@@ -159,7 +159,8 @@ pub struct DelegationAuditEvent {
     /// Caller identity context
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller: Option<AuditCallerContext>,
-    /// MCP tool name (if this was an MCP tool call)
+    /// The tool the record is about: the MCP tool of a `tools/call`, or, on a
+    /// policy decision for an A2A or AP2 request, its JSON-RPC method
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_tool_name: Option<String>,
     /// VP JWT injected into the upstream response (if identity VP was sent)
