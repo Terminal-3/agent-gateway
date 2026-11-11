@@ -3366,6 +3366,7 @@ fn outbound_called_tool(ctx: &OutboundPipelineContext) -> Option<String> {
             .operation
             .as_deref()
             .map(crate::a2a::canonical_method)
+            .map(crate::observability::policy_audit::recorded_tool_name)
             .map(str::to_string),
         crate::config::agent_surface::TransitProtocol::Mcp => ctx
             .body_bytes

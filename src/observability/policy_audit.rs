@@ -186,8 +186,9 @@ pub fn current_request_variant() -> Option<String> {
 
 /// Records what the request being served calls: `protocol`, the serialised
 /// protocol of the surface or Transit Point serving it, and `tool`, the tool
-/// it names (see [`crate::surface_context::called_tool`]). Every policy
-/// decision the request records carries both. The first call set is kept.
+/// it names (see [`crate::surface_context::called_tool`]), kept cut to
+/// [`MAX_RECORDED_TOOL_BYTES`]. Every policy decision the request records
+/// carries both. The first call set is kept.
 /// Does nothing outside a request.
 pub fn set_request_call(
     protocol: &'static str,
@@ -200,6 +201,7 @@ pub fn set_request_call(
                 protocol,
                 tool: tool
                     .filter(|tool| !tool.is_empty())
+                    .map(recorded_tool_name)
                     .map(str::to_string),
             })
     });
@@ -212,7 +214,7 @@ pub fn set_request_call(
 const MAX_RECORDED_TOOL_BYTES: usize = 128;
 
 /// `name` cut to [`MAX_RECORDED_TOOL_BYTES`] at a UTF-8 character boundary.
-fn recorded_tool_name(name: &str) -> &str {
+pub(crate) fn recorded_tool_name(name: &str) -> &str {
     &name[..name.floor_char_boundary(MAX_RECORDED_TOOL_BYTES)]
 }
 
@@ -1741,6 +1743,21 @@ mod tests {
             .map(|event| event.mcp_tool_name.as_deref())
             .collect();
         assert_eq!(recorded, [Some(&method[..128]), Some(&straddling[..127]), Some(whole.as_str())]);
+    }
+
+    #[tokio::test]
+    async fn the_request_call_keeps_a_long_tool_name_cut() {
+        let method = "m".repeat(600);
+        let kept = in_request(RequestScope::fresh(), {
+            let method = method.clone();
+            async move {
+                set_request_call("a2a", Some(&method));
+                current_request_call().and_then(|call| call.tool)
+            }
+        })
+        .await;
+
+        assert_eq!(kept.as_deref(), Some(&method[..MAX_RECORDED_TOOL_BYTES]));
     }
 
     /// The protocol and tool on a gateway decision recorded where this runs.
