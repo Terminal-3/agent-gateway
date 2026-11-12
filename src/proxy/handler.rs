@@ -17984,7 +17984,12 @@ allow if {
         body: serde_json::Value,
     ) -> (axum::http::StatusCode, Vec<RecordedRefusal>) {
         let (status, events) = access_point_records(router, path, body).await;
-        let refusals = events
+        (status, refusals_of(events))
+    }
+
+    /// The `request_rejected` records among `events`.
+    fn refusals_of(events: Vec<crate::delegation_vault::audit::DelegationAuditEvent>) -> Vec<RecordedRefusal> {
+        events
             .into_iter()
             .filter_map(|event| match event.event {
                 crate::delegation_vault::audit::DelegationAuditAction::RequestRejected {
@@ -18001,8 +18006,7 @@ allow if {
                 )),
                 _ => None,
             })
-            .collect();
-        (status, refusals)
+            .collect()
     }
 
     /// Sends one request through the Access Point and returns its status with
@@ -18012,10 +18016,24 @@ allow if {
         path: &str,
         body: serde_json::Value,
     ) -> (axum::http::StatusCode, Vec<crate::delegation_vault::audit::DelegationAuditEvent>) {
-        let request = axum::http::Request::builder()
+        access_point_records_with_headers(router, path, &[], body).await
+    }
+
+    /// [`access_point_records`] for a request that also carries `headers`.
+    async fn access_point_records_with_headers(
+        router: crate::state::MultiSurfaceProxyState,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, Vec<crate::delegation_vault::audit::DelegationAuditEvent>) {
+        let mut request = axum::http::Request::builder()
             .method("POST")
             .uri(path)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let request = request
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let (response, events) =
@@ -18438,6 +18456,38 @@ allow if {
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
         assert_eq!(refusals, vec![(RejectionStage::Forward, RejectionReason::SsrfBlocked, 403, None)]);
         assert_eq!(starts, 1, "a forwarded request starts one vetting");
+    }
+
+    /// A request the local payment gate prices has its Target vetted before
+    /// its payment is verified, so a blocked Target is refused with `403` and
+    /// its `SsrfBlocked` record alone. The request presents a payment signature
+    /// that verification refuses, so any verification would answer with a
+    /// payment error instead, and no settlement can follow.
+    async fn priced_requests_to_a_blocked_target_take_no_payment(state: &crate::state::ProxyState) {
+        use crate::audit::request_events::{RejectionReason, RejectionStage};
+        use serde_json::json;
+
+        let surface: crate::config::agent_surface::AgentSurface = serde_json::from_value(json!({
+            "surface_id": "priced-blocked", "name": "Priced blocked",
+            "access_point": {"listen_address": "https://gateway.example", "route": "/mcp", "protocol": "mcp"},
+            "target": {"endpoint": "http://169.254.169.254/mcp", "payment_policy": {
+                "type": "x402", "enabled": true, "verification_mode": "mock", "settlement_mode": "immediate",
+                "payment_requirements": [{"scheme": "exact", "network": "eip155:1", "amount": "1000",
+                    "asset": "0x123", "payTo": "0x456", "maxTimeoutSeconds": 300}],
+                "mcp_payment_triggers": {"mode": "all"}
+            }}
+        }))
+        .unwrap();
+        let ((status, events), starts) = super::target_vetting::count_starts(access_point_records_with_headers(
+            direct_router_state(state, surface),
+            "/mcp",
+            &[("PAYMENT-SIGNATURE", "not a payment payload")],
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search", "arguments": {}}}),
+        ))
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(refusals_of(events), vec![(RejectionStage::Forward, RejectionReason::SsrfBlocked, 403, None)]);
+        assert_eq!(starts, 1);
     }
 
     /// A forwarded request goes out on the pinned, redirect-disabled client:
@@ -20033,6 +20083,7 @@ allow if {
         proxy_access_point_answers_modern_discovery(&state).await;
         access_point_records_request_refusals(&state).await;
         local_answers_never_vet_the_target(&state).await;
+        priced_requests_to_a_blocked_target_take_no_payment(&state).await;
         forwarded_requests_use_the_pinned_client(&state).await;
         policy_denied_requests_never_reach_the_target(&state).await;
         access_point_requests_each_carry_their_own_request_id(&state).await;
