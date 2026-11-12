@@ -3268,6 +3268,7 @@ async fn proxy_handler_with_mcp_runtime(
     let mut forward_client: Option<reqwest::Client> = target_grant
         .as_ref()
         .map(|route| route.client().clone());
+    let mut forward_addrs: Option<Vec<std::net::SocketAddr>> = None;
     if let Ok(vetted_url) = &target_url
         && forward_client.is_none()
         && !forwards_to_fabric
@@ -3275,7 +3276,10 @@ async fn proxy_handler_with_mcp_runtime(
         && !is_mcp_proxy_target
     {
         match pinned_target_client(&state, &channel_name, vetted_url, &audit_facts).await {
-            Ok(client) => forward_client = Some(client),
+            Ok((client, addrs)) => {
+                forward_client = Some(client);
+                forward_addrs = Some(addrs);
+            }
             Err(blocked) => return Ok(blocked),
         }
     }
@@ -7739,9 +7743,10 @@ async fn proxy_handler_with_mcp_runtime(
             sse_status
         );
 
-        // The Legacy SSE session goes to the same vetted host as the forward,
-        // over the same pinned, redirect-disabled client.
-        let Some(sse_client) = vetted_forward_client.as_ref() else {
+        // The Legacy SSE session goes to the addresses the forward vetted, over
+        // the same pinned, redirect-disabled client; a cached session pinned to
+        // other addresses is not reused.
+        let (Some(sse_client), Some(sse_addrs)) = (vetted_forward_client.as_ref(), forward_addrs.as_deref()) else {
             warn!(surface = %channel_name, "SSE fallback has no vetted client for the target");
             crate::audit::request_events::request_rejected(
                 &audit_facts,
@@ -7757,6 +7762,7 @@ async fn proxy_handler_with_mcp_runtime(
         };
         match crate::mcp::sse_transport::send_via_persistent_sse(
             sse_client,
+            Some(sse_addrs),
             &state.surface.target.endpoint,
             &body_bytes,
             &channel_name,
@@ -14864,8 +14870,8 @@ fn extended_agent_card_refusal(rpc_request_id: Option<&serde_json::Value>) -> Re
     crate::a2a::url_rewriter::extended_agent_card_refusal(rpc_request_id)
 }
 
-/// A redirect-disabled client pinned to the vetted address of `target_url`, or
-/// the 403 to answer when egress policy blocks it. Pinning stops DNS rebinding
+/// A redirect-disabled client pinned to the vetted addresses of `target_url`,
+/// with those addresses, or the 403 to answer when egress policy blocks it. Pinning stops DNS rebinding
 /// between vetting and connect; disabling redirects stops a 3xx from sending
 /// the request, and any credential on it, to an unvetted host. A block is
 /// recorded as a refusal; a vetting task that did not run is a gateway fault.
@@ -14874,7 +14880,7 @@ async fn pinned_target_client(
     channel_name: &str,
     target_url: &str,
     facts: &crate::audit::request_events::RequestFacts<'_>,
-) -> Result<reqwest::Client, Response> {
+) -> Result<(reqwest::Client, Vec<std::net::SocketAddr>), Response> {
     let candidate = target_url.to_string();
     let timeout = std::time::Duration::from_secs(
         state
@@ -14883,7 +14889,7 @@ async fn pinned_target_client(
             .timeout_seconds,
     );
     match tokio::task::spawn_blocking(move || crate::egress::pinned_forward_client(&candidate, timeout)).await {
-        Ok(Ok((client, _target))) => Ok(client),
+        Ok(Ok((client, target))) => Ok((client, target.addrs)),
         Ok(Err(e)) => {
             warn!(channel = channel_name, target = %loggable::url(target_url), "SSRF blocked by egress policy: {}", e);
             crate::audit::request_events::request_rejected(

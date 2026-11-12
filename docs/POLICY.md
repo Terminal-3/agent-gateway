@@ -480,7 +480,9 @@ and connect, and an upstream 3xx is returned to the caller rather than followed.
 On the inbound sink the target is vetted before a delegated (`agent_pay`) payment
 is decided, so no payment is delegated for a request whose target is refused. An
 MCP Legacy SSE fallback (a `POST` the Target rejects with `400`, `404` or `405`,
-retried over `GET /sse`) uses the same pinned client as the forward.
+retried over `GET /sse`) uses the same pinned client as the forward, and reuses a
+cached Legacy SSE session only when every address that session is pinned to was
+vetted for this request; otherwise it opens a new session that replaces it.
 A2A-proxy and legacy MCP `proxy://` targets are **not** DNS-resolved/pinned here
 (vetted at dial time / MCP-proxy create time). A modern (`2026-07-28`) owned MCP
 Proxy `tools/call` dials its REST backend through a pinned, redirect-free client

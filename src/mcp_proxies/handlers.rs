@@ -838,6 +838,7 @@ async fn send_discovery_request(
             if matches!(status.as_u16(), 400 | 404 | 405) {
                 return crate::mcp::sse_transport::send_via_persistent_sse(
                     client,
+                    None,
                     target_endpoint,
                     request_body.as_ref(),
                     channel_name,
