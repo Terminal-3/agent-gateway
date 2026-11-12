@@ -477,6 +477,10 @@ and forwards through a per-request `reqwest::Client` **pinned** to that exact
 resolved address via `resolve_to_addrs` (TLS SNI preserved) with **redirects
 disabled** — so a host cannot rebind to an internal/metadata IP between vetting
 and connect, and an upstream 3xx is returned to the caller rather than followed.
+On the inbound sink the target is vetted before a delegated (`agent_pay`) payment
+is decided, so no payment is delegated for a request whose target is refused. An
+MCP Legacy SSE fallback (a `POST` the Target rejects with `400`, `404` or `405`,
+retried over `GET /sse`) uses the same pinned client as the forward.
 A2A-proxy and legacy MCP `proxy://` targets are **not** DNS-resolved/pinned here
 (vetted at dial time / MCP-proxy create time). A modern (`2026-07-28`) owned MCP
 Proxy `tools/call` dials its REST backend through a pinned, redirect-free client
@@ -551,15 +555,11 @@ TOCTOU on the remaining validate-then-connect fetch sinks.
   loopback and private receivers are allowed, cloud metadata is blocked, redirects are not followed.
   The mediator directory request (`AG_MEDIATOR_DIRECTORY_URL`, [`INTEGRATIONS.md`](INTEGRATIONS.md#mediator-directory))
   uses the same client and the same rules.
-- `egress::pinned_forward_client` also pins the **agent-card fetch** from an
-  `http(s)` surface target whenever it carries `target.auth`
-  (`src/proxy/handler/agent_card.rs`), so the
-  credential cannot follow a 3xx to another host. A 3xx answers `502`
-  "Upstream redirected"; a blocked target answers `403` "Request blocked by
-  egress policy". It shares the `pinned_target_client` helper with the
-  inbound forward step. Without `target.auth` the fetch
-  uses the shared proxy client, which returns a 3xx rather than following it
-  but is not pinned.
+- `egress::pinned_forward_client` also pins the served **agent-card fetch** from
+  an `http(s)` surface target (`src/proxy/handler/agent_card.rs`), with or
+  without `target.auth`. A 3xx answers `502` "Upstream redirected"; a blocked
+  target answers `403` "Request blocked by egress policy". With `target.auth`
+  it shares the `pinned_target_client` helper with the inbound forward step.
 - The [agent card preview](PROTOCOLS.md#agent-card-preview) builds the same card
   but always fetches an `http(s)` Target over `egress::pinned_forward_client`, with
   or without `target.auth`, and records nothing; a blocked target reports
