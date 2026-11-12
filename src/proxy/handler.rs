@@ -7633,6 +7633,7 @@ async fn proxy_handler_with_mcp_runtime(
         };
         Ok::<_, Response>(upstream_response)
     };
+    let sent_upstream = owned_modern_response.is_none();
     let upstream_response = if let Some(response) = owned_modern_response {
         drop(send_response);
         Ok(response)
@@ -7659,7 +7660,9 @@ async fn proxy_handler_with_mcp_runtime(
     } else {
         send_response.await
     };
-    request_timing.upstream(request_latency_start.elapsed());
+    if sent_upstream {
+        request_timing.upstream(request_latency_start.elapsed());
+    }
     let upstream_response = upstream_response?;
     // The vendor's answer to the Target's grant: a refusal of the token gets
     // one refresh and one retry, and its cookies and authentication challenges
