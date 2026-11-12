@@ -488,21 +488,24 @@ and Fabric receive `403` "Request blocked by egress policy"; outbound
 On the inbound Access Point the vetting runs only for a request the gateway forwards: a request
 it answers itself, such as an MCP notification, never resolves the target. It starts once the
 request is known not to be answered locally and runs on a blocking thread alongside identity,
-Trust Check and policy, and its result is awaited after the policy gates and before a modern
-MCP request's payment (delegated or local), credential delegation, target authentication and the
-upstream request. When the surface's local payment gate prices the request, it is awaited before
-that payment is processed instead. Payment delegated to a payment gateway for any other request
-is decided at admission, ahead of the vetting. So a request that is refused earlier (body size, an MCP local answer, identity, Trust
-Check, policy or tool gating) gets that refusal even when its target is also blocked; a blocked
-target that passes all of them gets the `403` and its `request_rejected` record. A vetting whose
-request is refused first is dropped, and its client is never used.
+Trust Check and surface policy. Its result is awaited after those gates and before a modern MCP
+request's payment (delegated or local), credential delegation, target authentication and the
+upstream request. For any other request, payment delegated to a payment gateway is decided at
+admission, ahead of the vetting. So a request that is refused earlier (body size, an MCP local
+answer, identity, Trust Check, policy or tool gating) gets that refusal even when its target is
+also blocked; a blocked target that passes all of them gets the `403` and its `request_rejected`
+record. A vetting whose request is refused first is dropped, and its client is never used. This
+holds for every modern MCP request, including one the local payment gate prices: its payment
+runs after the gates, so the gates decide first.
 
-A request the local payment gate prices is the exception. Once it carries its payment signature
-or credential (an unpaid one still gets its `402` first), its target is vetted ahead of the
-body-size limit, the MCP local answers, identity, Trust Check, policy and tool gating, so that no
+The exception is a request that is not a modern MCP request and that the surface's local
+payment gate (x402 or MPP) prices. The gate prices a request from the surface's payment
+configuration and the request itself, whether or not the request carries a payment signature
+or credential. Such a request has its target vetted ahead of the body-size limit, the MCP local
+answers, identity, Trust Check, surface policy, tool gating and the payment step, so that no
 payment is verified or settled for a target that cannot be reached. A blocked target therefore
-gets the `403` and its `SsrfBlocked` record, and those later gates record no decision for that
-request.
+gets the `403` and its `SsrfBlocked` record, even when the request carries no payment and would
+otherwise get a `402`, and those later gates record no decision for that request.
 
 A Transit Point request that carries a grant by binding (`consent_mode: external`) is held to
 more: the outbound forward sends it only to the origin of its provider's `resource`, through

@@ -3948,8 +3948,9 @@ async fn proxy_handler_with_mcp_runtime(
     // same-VPC upstream. A2A-proxy targets are vetted at dial time and at
     // config-set time. MCP `proxy://` targets are virtual identifiers whose
     // REST backend is vetted when the MCP proxy is saved. The vetting runs only
-    // for a request that is forwarded: before local payment when that payment
-    // prices the request, otherwise alongside identity, Trust Check and policy.
+    // for a request that is forwarded: right here when local payment prices a
+    // request that is not modern MCP, otherwise alongside identity, Trust Check
+    // and policy.
     // Either way it is awaited before local payment, a modern request's
     // delegated payment, credential delegation and the upstream request.
     let is_mcp_proxy_target = target_url.starts_with("proxy://");
