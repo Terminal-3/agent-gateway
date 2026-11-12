@@ -503,9 +503,13 @@ payment gate (x402 or MPP) prices. The gate prices a request from the surface's 
 configuration and the request itself, whether or not the request carries a payment signature
 or credential. Such a request has its target vetted ahead of the body-size limit, the MCP local
 answers, identity, Trust Check, surface policy, tool gating and the payment step, so that no
-payment is verified or settled for a target that cannot be reached. A blocked target therefore
+payment is verified or settled for a target egress policy blocks. A blocked target therefore
 gets the `403` and its `SsrfBlocked` record, even when the request carries no payment and would
 otherwise get a `402`, and those later gates record no decision for that request.
+
+Vetting resolves the target and checks its addresses against egress policy; it does not connect
+to the target. A target that passes vetting but has no service listening fails only at the
+forward, after the request's payment, if any, has been processed.
 
 A Transit Point request that carries a grant by binding (`consent_mode: external`) is held to
 more: the outbound forward sends it only to the origin of its provider's `resource`, through
