@@ -15,6 +15,7 @@ pub mod handler;
 pub mod outbound_handler;
 pub mod paths;
 pub mod protocol_router;
+pub(crate) mod request_timing;
 pub mod response_policy;
 pub mod route_variant;
 pub mod rules_engine;
