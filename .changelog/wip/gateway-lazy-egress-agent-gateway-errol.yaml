@@ -12,7 +12,9 @@ changes:
         upstream request, before local payment when that prices the request, and before a
         modern MCP request's delegated payment. A request refused by an earlier stage now gets that refusal even when its
         Target is also blocked; a blocked Target that passes every stage still gets the same 403
-        and refusal record.
+        and refusal record. A request the local payment gate prices still has its Target vetted
+        before the body-size limit, identity, Trust Check and policy, so no payment is taken
+        for a Target that cannot be reached.
   fixed: []
   removed: []
   security: []

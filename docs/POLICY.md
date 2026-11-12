@@ -497,6 +497,13 @@ Check, policy or tool gating) gets that refusal even when its target is also blo
 target that passes all of them gets the `403` and its `request_rejected` record. A vetting whose
 request is refused first is dropped, and its client is never used.
 
+A request the local payment gate prices is the exception. Once it carries its payment signature
+or credential (an unpaid one still gets its `402` first), its target is vetted ahead of the
+body-size limit, the MCP local answers, identity, Trust Check, policy and tool gating, so that no
+payment is verified or settled for a target that cannot be reached. A blocked target therefore
+gets the `403` and its `SsrfBlocked` record, and those later gates record no decision for that
+request.
+
 A Transit Point request that carries a grant by binding (`consent_mode: external`) is held to
 more: the outbound forward sends it only to the origin of its provider's `resource`, through
 `egress::pinned_vendor_client` (the Strict policy, `https` only), and never over Fabric. See
