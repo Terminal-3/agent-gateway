@@ -6237,6 +6237,7 @@ async fn process_forward_request_in_request_scope(
 
             match crate::mcp::sse_transport::send_via_persistent_sse(
                 &client,
+                None,
                 &target_url,
                 &body_bytes,
                 channel_id,
@@ -6356,6 +6357,7 @@ async fn process_forward_request_in_request_scope(
 
                 match crate::mcp::sse_transport::send_via_persistent_sse(
                     &client,
+                    None,
                     &target_url,
                     &body_bytes,
                     channel_id,

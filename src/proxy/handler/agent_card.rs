@@ -681,6 +681,7 @@ impl TargetCardFetch<'_> {
             },
         )
         .await
+        .map(|(client, _)| client)
         .map_err(|response| self.fail(FetchFault::BlockedByEgress, response))
     }
 

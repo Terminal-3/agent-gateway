@@ -11,8 +11,10 @@ changes:
         When an MCP Target rejects a direct POST with 400, 404 or 405, the Legacy SSE retry
         now uses the same pinned, redirect-disabled client as the forward. With no HTTP
         proxy configured, it cannot reach an address the Target's host re-resolves to; a
-        configured proxy resolves the host itself. With no vetted client it is refused
-        with `403` "Request blocked by egress policy".
+        configured proxy resolves the host itself. A cached Legacy SSE session is reused
+        only when every address it is pinned to was vetted for the request; otherwise a new
+        session replaces it. With no vetted client the retry is refused with `403`
+        "Request blocked by egress policy".
     - timestamp: '2026-11-12T00:00:00Z'
       title: Vet the Target before delegating a payment for an Access Point request
       description: >-
