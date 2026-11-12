@@ -1,0 +1,26 @@
+branch: gateway-egress-gaps-agent-gateway-errol
+changes:
+  added: []
+  changed: []
+  fixed: []
+  removed: []
+  security:
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Send the Legacy SSE fallback only to the Target's vetted address
+      description: >-
+        When an MCP Target rejects a direct POST with 400, 404 or 405, the Legacy SSE retry
+        now uses the same pinned, redirect-disabled client as the forward, so it cannot
+        reach an address the Target's host re-resolves to. With no vetted client it is
+        refused with `403` "Request blocked by egress policy".
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Vet the Target before delegating a payment for an Access Point request
+      description: >-
+        A delegated (`agent_pay`) payment is decided only after the Target passes egress
+        vetting, so no payment is delegated or settled for a request whose Target is then
+        refused. A blocked Target still answers `403` with the same refusal record.
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Fetch a served agent card without target auth from the vetted address
+      description: >-
+        The served agent card is fetched through a client pinned to the Target's vetted
+        address whether or not it carries `target.auth`. A blocked Target answers `403`
+        "Request blocked by egress policy"; a host that does not resolve stays `502`.
