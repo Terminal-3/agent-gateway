@@ -9,9 +9,10 @@ changes:
       title: Send the Legacy SSE fallback only to the Target's vetted address
       description: >-
         When an MCP Target rejects a direct POST with 400, 404 or 405, the Legacy SSE retry
-        now uses the same pinned, redirect-disabled client as the forward, so it cannot
-        reach an address the Target's host re-resolves to. With no vetted client it is
-        refused with `403` "Request blocked by egress policy".
+        now uses the same pinned, redirect-disabled client as the forward. With no HTTP
+        proxy configured, it cannot reach an address the Target's host re-resolves to; a
+        configured proxy resolves the host itself. With no vetted client it is refused
+        with `403` "Request blocked by egress policy".
     - timestamp: '2026-11-12T00:00:00Z'
       title: Vet the Target before delegating a payment for an Access Point request
       description: >-
@@ -23,4 +24,5 @@ changes:
       description: >-
         The served agent card is fetched through a client pinned to the Target's vetted
         address whether or not it carries `target.auth`. A blocked Target answers `403`
-        "Request blocked by egress policy"; a host that does not resolve stays `502`.
+        "Request blocked by egress policy". A host that does not resolve answers `502`
+        without `target.auth` and `403` with it.
