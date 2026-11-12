@@ -1,0 +1,22 @@
+branch: gateway-lazy-egress-agent-gateway-errol
+changes:
+  added: []
+  changed:
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Vet an Access Point's Target only for forwarded requests, alongside policy
+      description: >-
+        The SSRF vetting of an Access Point's Target (resolve, refuse cloud-metadata addresses,
+        pin the client) no longer runs for a request the gateway answers itself, such as an MCP
+        notification, and for a forwarded request it runs alongside identity, Trust Check and
+        policy instead of before them. It is still awaited before credential delegation, the
+        upstream request and a modern MCP request's payment. A request refused by an earlier
+        stage now gets that refusal even when its Target is also blocked; a blocked Target that
+        passes every stage still gets the same 403 and refusal record. A request other than a
+        modern MCP request that the local payment gate prices, with or without a payment
+        credential, still has its Target vetted before the body-size limit, identity, Trust
+        Check, policy and payment, so no payment is taken for a Target
+        that egress policy blocks.
+  fixed: []
+  removed: []
+  security: []
+  breaking: []

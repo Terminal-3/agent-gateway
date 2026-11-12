@@ -30,6 +30,7 @@ use crate::{channel_debug, channel_error, channel_info, channel_warn};
 mod a2a_stream;
 pub(crate) mod agent_card;
 pub(crate) mod surface_payment;
+mod target_vetting;
 
 /// Lazy-initialized SSE session manager for MCP proxy:// channels.
 /// Shared across all channel proxy handlers.
@@ -3939,23 +3940,19 @@ async fn proxy_handler_with_mcp_runtime(
         }
     };
 
-    // Defense-in-depth SSRF guard at the forwarding layer. `pinned_forward_client`
-    // fails closed on an unparseable URL, resolves DNS once to block any host that
-    // *resolves* to a cloud-metadata endpoint (not just static metadata
-    // hostnames), and returns a redirect-disabled client pinned to that exact
-    // resolved address — so the connection cannot be re-resolved to an internal
-    // address between vetting and connect (DNS rebinding) and an upstream 3xx is
-    // returned to the caller rather than followed to an unvetted `Location`.
-    // Loopback and RFC 1918 stay allowed on purpose — an operator-configured
-    // surface legitimately forwards to a localhost sidecar or same-VPC upstream.
-    // A2A-proxy targets carry an empty `target_url` here; their real `base_url`
-    // egress is vetted at dial time (strict egress guard) and at config-set time,
-    // so they are skipped at this sink. MCP `proxy://` targets are a virtual
-    // identifier here too, not a network address (the gateway resolves the real
-    // REST backend and dispatches it further down this function); that backend's
-    // `base_url` is already vetted with `validate_resolved_url` when the MCP proxy
-    // is created/updated, so it is also skipped at this sink rather than
-    // DNS-resolving the placeholder host and failing closed on every request.
+    // Defense-in-depth SSRF guard at the forwarding layer: `TargetVetting`
+    // fails closed on an unparseable URL, blocks a host that resolves to a
+    // cloud-metadata endpoint, and yields a redirect-disabled client pinned to
+    // the vetted addresses. Loopback and RFC 1918 stay allowed, since an
+    // operator-configured surface may forward to a localhost sidecar or a
+    // same-VPC upstream. A2A-proxy targets are vetted at dial time and at
+    // config-set time. MCP `proxy://` targets are virtual identifiers whose
+    // REST backend is vetted when the MCP proxy is saved. The vetting runs only
+    // for a request that is forwarded: right here when local payment prices a
+    // request that is not modern MCP, otherwise alongside identity, Trust Check
+    // and policy.
+    // Either way it is awaited before local payment, a modern request's
+    // delegated payment, credential delegation and the upstream request.
     let is_mcp_proxy_target = target_url.starts_with("proxy://");
     // A request carrying the grant of a Target bound by external consent goes
     // to the URL its route decided.
@@ -3966,8 +3963,15 @@ async fn proxy_handler_with_mcp_runtime(
     let mut forward_client: Option<reqwest::Client> = target_grant
         .as_ref()
         .map(|route| route.client().clone());
-    if forward_client.is_none() && !is_a2a_proxy_target && !is_mcp_proxy_target {
-        match pinned_target_client(&state, &channel_name, &target_url, &audit_facts).await {
+    let vets_target = forward_client.is_none() && !is_a2a_proxy_target && !is_mcp_proxy_target;
+    if vets_target
+        && !defer_surface_payment
+        && surface_payment::prices(&state, &body_bytes, mcp_context.as_ref())
+    {
+        match target_vetting::TargetVetting::start(&state, &channel_name, &target_url)
+            .finish(&channel_name, &audit_facts)
+            .await
+        {
             Ok(client) => forward_client = Some(client),
             Err(blocked) => return Ok(blocked),
         }
@@ -4749,6 +4753,9 @@ async fn proxy_handler_with_mcp_runtime(
             }
         }
     }
+
+    let target_vetting = (vets_target && forward_client.is_none())
+        .then(|| target_vetting::TargetVetting::start(&state, &channel_name, &target_url));
 
     // x402 payment has already been verified earlier in the handler (line ~395)
     // Use MPP receipt if available, otherwise None
@@ -6085,6 +6092,21 @@ async fn proxy_handler_with_mcp_runtime(
         return Ok(response);
     }
 
+    if let Some(vetting) = target_vetting {
+        match vetting
+            .finish(&channel_name, &audit_facts)
+            .await
+        {
+            Ok(client) => forward_client = Some(client),
+            Err(blocked) => {
+                connection_guard
+                    .decrement()
+                    .await;
+                return Ok(blocked);
+            }
+        }
+    }
+
     let mut modern_delegation = None;
     if let Some(request) = modern_request.as_ref()
         && state
@@ -6273,13 +6295,20 @@ async fn proxy_handler_with_mcp_runtime(
         }
     };
 
-    // Build upstream request. The forward send uses the per-request pinned,
-    // redirect-disabled client built at the SSRF vetting sink above; only the
-    // MCP `proxy://` skip (never DNS-resolved here) falls back to the pooled
-    // client, and A2A-proxy targets returned earlier.
-    let forward_client = forward_client
-        .as_ref()
-        .unwrap_or(&state.client);
+    // The forward send uses the pinned, redirect-disabled client from the
+    // vetting above or from the Target grant. Only an MCP `proxy://` target,
+    // never a network address here, uses the pooled client.
+    let forward_client = match forward_client.as_ref() {
+        Some(client) => client,
+        None if is_mcp_proxy_target => &state.client,
+        None => {
+            error!(channel = channel_name, target = %loggable::url(&target_url), "No vetted client for the forward target");
+            connection_guard
+                .decrement()
+                .await;
+            return Ok(create_error_response(StatusCode::FORBIDDEN, "Request blocked by egress policy"));
+        }
+    };
     let mut upstream_req = forward_client
         .request(method.clone(), &target_url)
         .body(body_bytes.clone());
@@ -14824,49 +14853,6 @@ fn extended_agent_card_refusal(rpc_request_id: Option<&serde_json::Value>) -> Re
     crate::a2a::url_rewriter::extended_agent_card_refusal(rpc_request_id)
 }
 
-/// A redirect-disabled client pinned to the vetted address of `target_url`, or
-/// the 403 to answer when egress policy blocks it. Pinning stops DNS rebinding
-/// between vetting and connect; disabling redirects stops a 3xx from sending
-/// the request, and any credential on it, to an unvetted host. A block is
-/// recorded as a refusal; a vetting task that did not run is a gateway fault.
-async fn pinned_target_client(
-    state: &ProxyState,
-    channel_name: &str,
-    target_url: &str,
-    facts: &crate::audit::request_events::RequestFacts<'_>,
-) -> Result<reqwest::Client, Response> {
-    let candidate = target_url.to_string();
-    let timeout = std::time::Duration::from_secs(
-        state
-            .config
-            .a2a
-            .timeout_seconds,
-    );
-    match tokio::task::spawn_blocking(move || crate::egress::pinned_forward_client(&candidate, timeout)).await {
-        Ok(Ok((client, _target))) => Ok(client),
-        Ok(Err(e)) => {
-            warn!(channel = channel_name, target = %loggable::url(target_url), "SSRF blocked by egress policy: {}", e);
-            crate::audit::request_events::request_rejected(
-                facts,
-                crate::audit::request_events::RejectionStage::Forward,
-                crate::audit::request_events::RejectionReason::SsrfBlocked,
-                403,
-                None,
-            );
-            Err(create_error_response(StatusCode::FORBIDDEN, "Request blocked by egress policy"))
-        }
-        Err(e) => {
-            warn!(
-                channel = channel_name,
-                target = %loggable::url(target_url),
-                "SSRF egress validation task failed: {}",
-                e
-            );
-            Err(create_error_response(StatusCode::FORBIDDEN, "Request blocked by egress policy"))
-        }
-    }
-}
-
 /// Caller headers forwarded on an agent-card fetch that carries the target
 /// credential. The caller is anonymous, so only content negotiation passes;
 /// nothing the caller sends can override the credential or ride along on a
@@ -17999,7 +17985,12 @@ allow if {
         body: serde_json::Value,
     ) -> (axum::http::StatusCode, Vec<RecordedRefusal>) {
         let (status, events) = access_point_records(router, path, body).await;
-        let refusals = events
+        (status, refusals_of(events))
+    }
+
+    /// The `request_rejected` records among `events`.
+    fn refusals_of(events: Vec<crate::delegation_vault::audit::DelegationAuditEvent>) -> Vec<RecordedRefusal> {
+        events
             .into_iter()
             .filter_map(|event| match event.event {
                 crate::delegation_vault::audit::DelegationAuditAction::RequestRejected {
@@ -18016,8 +18007,7 @@ allow if {
                 )),
                 _ => None,
             })
-            .collect();
-        (status, refusals)
+            .collect()
     }
 
     /// Sends one request through the Access Point and returns its status with
@@ -18027,10 +18017,24 @@ allow if {
         path: &str,
         body: serde_json::Value,
     ) -> (axum::http::StatusCode, Vec<crate::delegation_vault::audit::DelegationAuditEvent>) {
-        let request = axum::http::Request::builder()
+        access_point_records_with_headers(router, path, &[], body).await
+    }
+
+    /// [`access_point_records`] for a request that also carries `headers`.
+    async fn access_point_records_with_headers(
+        router: crate::state::MultiSurfaceProxyState,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, Vec<crate::delegation_vault::audit::DelegationAuditEvent>) {
+        let mut request = axum::http::Request::builder()
             .method("POST")
             .uri(path)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let request = request
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let (response, events) =
@@ -18407,6 +18411,209 @@ allow if {
             assert_eq!(observed_status.as_u16(), status, "{case}: status");
             assert_eq!(refusals, vec![expected], "{case}: recorded refusals");
         }
+    }
+
+    /// Sends one request through the Access Point and returns its status, its
+    /// `request_rejected` records and how many forward-target vettings it started.
+    async fn access_point_vetting(
+        router: crate::state::MultiSurfaceProxyState,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (axum::http::StatusCode, Vec<RecordedRefusal>, usize) {
+        let ((status, refusals), starts) =
+            super::target_vetting::count_starts(access_point_refusal(router, path, body)).await;
+        (status, refusals, starts)
+    }
+
+    /// A request the Access Point answers itself never vets the Target, so an
+    /// MCP notification to a Target egress policy blocks still gets its local
+    /// 204; a forwarded request to the same Target is vetted and refused.
+    async fn local_answers_never_vet_the_target(state: &crate::state::ProxyState) {
+        use crate::audit::request_events::{RejectionReason, RejectionStage};
+        use serde_json::json;
+
+        let surface: crate::config::agent_surface::AgentSurface = serde_json::from_value(json!({
+            "surface_id": "lazy-vetting", "name": "Lazy vetting",
+            "access_point": {"listen_address": "https://gateway.example", "route": "/mcp", "protocol": "mcp"},
+            "target": {"endpoint": "http://169.254.169.254/mcp"}
+        }))
+        .unwrap();
+        let (status, refusals, starts) = access_point_vetting(
+            direct_router_state(state, surface.clone()),
+            "/mcp",
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+        assert!(refusals.is_empty(), "{refusals:?}");
+        assert_eq!(starts, 0, "a notification starts no vetting");
+
+        let (status, refusals, starts) = access_point_vetting(
+            direct_router_state(state, surface),
+            "/mcp",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(refusals, vec![(RejectionStage::Forward, RejectionReason::SsrfBlocked, 403, None)]);
+        assert_eq!(starts, 1, "a forwarded request starts one vetting");
+    }
+
+    /// A request the local payment gate prices has its Target vetted before
+    /// its payment is verified, so a blocked Target is refused with `403` and
+    /// its `SsrfBlocked` record alone. The request presents a payment signature
+    /// that verification refuses, so any verification would answer with a
+    /// payment error instead, and no settlement can follow.
+    async fn priced_requests_to_a_blocked_target_take_no_payment(state: &crate::state::ProxyState) {
+        use crate::audit::request_events::{RejectionReason, RejectionStage};
+        use serde_json::json;
+
+        let surface: crate::config::agent_surface::AgentSurface = serde_json::from_value(json!({
+            "surface_id": "priced-blocked", "name": "Priced blocked",
+            "access_point": {"listen_address": "https://gateway.example", "route": "/mcp", "protocol": "mcp"},
+            "target": {"endpoint": "http://169.254.169.254/mcp", "payment_policy": {
+                "type": "x402", "enabled": true, "verification_mode": "mock", "settlement_mode": "immediate",
+                "payment_requirements": [{"scheme": "exact", "network": "eip155:1", "amount": "1000",
+                    "asset": "0x123", "payTo": "0x456", "maxTimeoutSeconds": 300}],
+                "mcp_payment_triggers": {"mode": "all"}
+            }}
+        }))
+        .unwrap();
+        let ((status, events), starts) = super::target_vetting::count_starts(access_point_records_with_headers(
+            direct_router_state(state, surface),
+            "/mcp",
+            &[("PAYMENT-SIGNATURE", "not a payment payload")],
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search", "arguments": {}}}),
+        ))
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(refusals_of(events), vec![(RejectionStage::Forward, RejectionReason::SsrfBlocked, 403, None)]);
+        assert_eq!(starts, 1);
+    }
+
+    /// A forwarded request goes out on the pinned, redirect-disabled client:
+    /// the Target's redirect reaches the caller and its `Location` is never
+    /// fetched.
+    async fn forwarded_requests_use_the_pinned_client(state: &crate::state::ProxyState) {
+        use serde_json::json;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let elsewhere = crate::component_tests::helpers::MockServer::start().await;
+        let location = elsewhere.url();
+        let redirects = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = redirects.clone();
+        let app = axum::Router::new().fallback(move || {
+            let location = location.clone();
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                (axum::http::StatusCode::FOUND, [(axum::http::header::LOCATION, location)])
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let target = listener
+            .local_addr()
+            .unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .unwrap();
+        });
+        let surface: crate::config::agent_surface::AgentSurface = serde_json::from_value(json!({
+            "surface_id": "pinned-forward", "name": "Pinned forward",
+            "access_point": {"listen_address": "https://gateway.example", "route": "/a2a", "protocol": "a2a"},
+            "target": {"endpoint": format!("http://{target}/rpc")}
+        }))
+        .unwrap();
+        let (status, _refusals, starts) = access_point_vetting(
+            direct_router_state(state, surface),
+            "/a2a/rpc",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {"message": {
+                "role": "user", "messageId": "m-1", "parts": [{"kind": "text", "text": "hello"}]
+            }}}),
+        )
+        .await;
+        server.abort();
+        assert_eq!(starts, 1);
+        assert_eq!(redirects.load(Ordering::SeqCst), 1, "the Target is called once ({status})");
+        assert_eq!(
+            elsewhere
+                .request_count
+                .load(Ordering::SeqCst),
+            0,
+            "the redirect is not followed ({status})"
+        );
+    }
+
+    /// A request surface policy denies sends nothing to its Target, and the
+    /// policy denial is its answer even when egress policy would also block the
+    /// Target.
+    async fn policy_denied_requests_never_reach_the_target(state: &crate::state::ProxyState) {
+        use crate::audit::request_events::RejectionReason;
+        use serde_json::json;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let directory = tempfile::tempdir().unwrap();
+        let policies = Arc::new(
+            crate::policies::policy_definitions::FileSystemPolicyDefinitionStore::new(
+                directory
+                    .path()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .await
+            .unwrap(),
+        );
+        policies
+            .save(
+                serde_json::from_value(json!({
+                    "id": "deny-calls", "name": "Deny calls", "policy_type": "agent_surface",
+                    "policy": "package surface.policy\ndefault allow = false", "created_at": "2026-11-12T00:00:00Z"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let target = crate::component_tests::helpers::MockServer::start().await;
+        let message = json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {"message": {
+            "role": "user", "messageId": "m-1", "parts": [{"kind": "text", "text": "hello"}]
+        }}});
+        for endpoint in [format!("{}/rpc", target.url()), "http://169.254.169.254/rpc".to_string()] {
+            let surface: crate::config::agent_surface::AgentSurface = serde_json::from_value(json!({
+                "surface_id": "denied", "name": "Denied",
+                "access_point": {"listen_address": "https://gateway.example", "route": "/a2a", "protocol": "a2a"},
+                "target": {"endpoint": endpoint, "policy": {"policy_definition_id": "deny-calls"}}
+            }))
+            .unwrap();
+            let manager = Arc::new(crate::policies::SurfacePolicyManager::new());
+            manager.set_policy_definition_store(policies.clone());
+            manager
+                .update_channel_policy(&surface)
+                .await
+                .unwrap();
+            let state = crate::state::ProxyState {
+                policy_manager: Some(manager),
+                ..state.clone()
+            };
+            let (status, refusals, _starts) =
+                access_point_vetting(direct_router_state(&state, surface), "/a2a/rpc", message.clone()).await;
+            assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{endpoint}");
+            assert!(
+                refusals
+                    .iter()
+                    .all(|(_, reason, _, _)| *reason != RejectionReason::SsrfBlocked),
+                "{endpoint}: the policy denial answers, not the egress block: {refusals:?}"
+            );
+        }
+        assert_eq!(
+            target
+                .request_count
+                .load(Ordering::SeqCst),
+            0
+        );
     }
 
     /// An Access Point targeting `proxy://` is backed by a gateway-owned server,
@@ -19876,6 +20083,10 @@ allow if {
         modern_extensions_survive_forwarding(&state).await;
         proxy_access_point_answers_modern_discovery(&state).await;
         access_point_records_request_refusals(&state).await;
+        local_answers_never_vet_the_target(&state).await;
+        priced_requests_to_a_blocked_target_take_no_payment(&state).await;
+        forwarded_requests_use_the_pinned_client(&state).await;
+        policy_denied_requests_never_reach_the_target(&state).await;
         access_point_requests_each_carry_their_own_request_id(&state).await;
         streamed_response_records_carry_the_request_id(&state).await;
         access_point_decisions_name_the_protocol_and_the_tool(&state).await;
