@@ -3187,6 +3187,103 @@ async fn proxy_handler_with_mcp_runtime(
         }
     };
 
+    // ── Target URL and egress vetting ──────────────────────────────────────
+    // Before any payment delegation, so no payment is delegated or settled
+    // for a request whose Target egress policy refuses.
+    let forwards_to_fabric = state
+        .surface
+        .target
+        .endpoint
+        .starts_with("fabric://");
+
+    // Build target URL (or get direct response for special protocols like DID).
+    // A2A Proxy targets are internal adapter references, not network URLs; keep
+    // them in the normal policy/trust pipeline, then dispatch after OPA.
+    // A discovery read is the only request a Target bound by external consent
+    // is sent without the grant, and it is sent without the caller's query.
+    let uri_without_query;
+    let forwarded_uri = match uri.path_and_query() {
+        Some(path_and_query)
+            if path_and_query
+                .query()
+                .is_some()
+                && crate::proxy::target_grant::binds_the_target(&state.surface) =>
+        {
+            uri_without_query = path_and_query
+                .path()
+                .parse()
+                .unwrap_or_else(|_| uri.clone());
+            &uri_without_query
+        }
+        _ => &uri,
+    };
+    let target_url = if is_a2a_proxy_target || forwards_to_fabric {
+        Ok(String::new())
+    } else {
+        build_target_url(
+            &state.surface.target.endpoint,
+            forwarded_uri,
+            &method,
+            &headers,
+            state
+                .surface
+                .override_agent_card_location(),
+            state
+                .surface
+                .agent_card_location_path(),
+        )
+    };
+
+    // Defense-in-depth SSRF guard at the forwarding layer. `pinned_forward_client`
+    // fails closed on an unparseable URL, resolves DNS once to block any host that
+    // *resolves* to a cloud-metadata endpoint (not just static metadata
+    // hostnames), and returns a redirect-disabled client pinned to that exact
+    // resolved address — so the connection cannot be re-resolved to an internal
+    // address between vetting and connect (DNS rebinding) and an upstream 3xx is
+    // returned to the caller rather than followed to an unvetted `Location`.
+    // Loopback and RFC 1918 stay allowed on purpose — an operator-configured
+    // surface legitimately forwards to a localhost sidecar or same-VPC upstream.
+    // A2A-proxy targets carry an empty `target_url` here; their real `base_url`
+    // egress is vetted at dial time (strict egress guard) and at config-set time,
+    // so they are skipped at this sink. MCP `proxy://` targets are a virtual
+    // identifier here too, not a network address (the gateway resolves the real
+    // REST backend and dispatches it further down this function); that backend's
+    // `base_url` is already vetted with `validate_resolved_url` when the MCP proxy
+    // is created/updated, so it is also skipped at this sink rather than
+    // DNS-resolving the placeholder host and failing closed on every request.
+    // `fabric://` targets are forwarded through Fabric, not dialled here.
+    let is_mcp_proxy_target = target_url
+        .as_ref()
+        .is_ok_and(|url| url.starts_with("proxy://"));
+    // A request carrying the grant of a Target bound by external consent goes
+    // to the URL its route decided.
+    let target_url = match target_grant.as_ref() {
+        Some(route) => target_url.map(|_| {
+            route
+                .target_url()
+                .to_string()
+        }),
+        None => target_url,
+    };
+    let mut forward_client: Option<reqwest::Client> = target_grant
+        .as_ref()
+        .map(|route| route.client().clone());
+    let mut forward_addrs: Option<Vec<std::net::SocketAddr>> = None;
+    if let Ok(vetted_url) = &target_url
+        && forward_client.is_none()
+        && !forwards_to_fabric
+        && !is_a2a_proxy_target
+        && !is_mcp_proxy_target
+    {
+        match pinned_target_client(&state, &channel_name, vetted_url, &audit_facts).await {
+            Ok((client, addrs)) => {
+                forward_client = Some(client);
+                forward_addrs = Some(addrs);
+            }
+            Err(blocked) => return Ok(blocked),
+        }
+    }
+
     // ── Track payment context for OPA input ────────────────────────────────
     let mut payment_context: Option<crate::surface_context::PaymentContext> = None;
 
@@ -3849,129 +3946,59 @@ async fn proxy_handler_with_mcp_runtime(
         .await;
     }
 
-    // Build target URL (or get direct response for special protocols like DID).
-    // A2A Proxy targets are internal adapter references, not network URLs; keep
-    // them in the normal policy/trust pipeline, then dispatch after OPA.
-    // A discovery read is the only request a Target bound by external consent
-    // is sent without the grant, and it is sent without the caller's query.
-    let uri_without_query;
-    let forwarded_uri = match uri.path_and_query() {
-        Some(path_and_query)
-            if path_and_query
-                .query()
-                .is_some()
-                && crate::proxy::target_grant::binds_the_target(&state.surface) =>
-        {
-            uri_without_query = path_and_query
-                .path()
-                .parse()
-                .unwrap_or_else(|_| uri.clone());
-            &uri_without_query
-        }
-        _ => &uri,
-    };
-    let target_url = if is_a2a_proxy_target {
-        String::new()
-    } else {
-        match build_target_url(
-            &state.surface.target.endpoint,
-            forwarded_uri,
-            &method,
-            &headers,
-            state
-                .surface
-                .override_agent_card_location(),
-            state
-                .surface
-                .agent_card_location_path(),
-        ) {
-            Ok(url) => url,
-            Err(direct_response) => {
-                // Special protocol handling (e.g., DID) - return direct response
-                debug!(channel = channel_name, "Returning direct response from protocol handler");
+    let target_url = match target_url {
+        Ok(url) => url,
+        Err(direct_response) => {
+            // Special protocol handling (e.g., DID) - return direct response
+            debug!(channel = channel_name, "Returning direct response from protocol handler");
 
-                // Record successful connection in metrics (using special case for direct responses)
-                if let Some(ref metrics) = state.metrics_store {
-                    let latency_ms = start_time
-                        .elapsed()
-                        .as_millis() as u64;
-                    let metrics = Arc::clone(metrics);
-                    let channel_config_id = state
-                        .surface
-                        .surface_id
-                        .clone();
-                    let source = source_addr.clone();
-                    let dest = state
-                        .surface
-                        .target
-                        .endpoint
-                        .clone();
-                    let trace_id = uuid::Uuid::new_v4().to_string();
-                    crate::observability::policy_audit::spawn_in_request(async move {
-                        metrics
-                            .record_connection(
-                                channel_config_id,
-                                source,
-                                dest,
-                                crate::metrics::ConnectionStatus::Success,
-                                Some(latency_ms),
-                                None,
-                                crate::metrics::ConnectionDirection::Request,
-                                trace_id,
-                                None,
-                                None,
-                                latency_ms,
-                            )
-                            .await;
-                    });
-                }
-
-                // Track task metrics: decrement active connections
-                if let (Some(_task_monitor), Some(task_id)) = (&state.task_monitor, &state.task_id) {
-                    info!(channel = channel_name, task_id = task_id, "Recording direct response connection metrics");
-                    connection_guard
-                        .decrement()
+            // Record successful connection in metrics (using special case for direct responses)
+            if let Some(ref metrics) = state.metrics_store {
+                let latency_ms = start_time
+                    .elapsed()
+                    .as_millis() as u64;
+                let metrics = Arc::clone(metrics);
+                let channel_config_id = state
+                    .surface
+                    .surface_id
+                    .clone();
+                let source = source_addr.clone();
+                let dest = state
+                    .surface
+                    .target
+                    .endpoint
+                    .clone();
+                let trace_id = uuid::Uuid::new_v4().to_string();
+                crate::observability::policy_audit::spawn_in_request(async move {
+                    metrics
+                        .record_connection(
+                            channel_config_id,
+                            source,
+                            dest,
+                            crate::metrics::ConnectionStatus::Success,
+                            Some(latency_ms),
+                            None,
+                            crate::metrics::ConnectionDirection::Request,
+                            trace_id,
+                            None,
+                            None,
+                            latency_ms,
+                        )
                         .await;
-                }
-
-                return Ok(direct_response);
+                });
             }
-        }
-    };
 
-    // Defense-in-depth SSRF guard at the forwarding layer. `pinned_forward_client`
-    // fails closed on an unparseable URL, resolves DNS once to block any host that
-    // *resolves* to a cloud-metadata endpoint (not just static metadata
-    // hostnames), and returns a redirect-disabled client pinned to that exact
-    // resolved address — so the connection cannot be re-resolved to an internal
-    // address between vetting and connect (DNS rebinding) and an upstream 3xx is
-    // returned to the caller rather than followed to an unvetted `Location`.
-    // Loopback and RFC 1918 stay allowed on purpose — an operator-configured
-    // surface legitimately forwards to a localhost sidecar or same-VPC upstream.
-    // A2A-proxy targets carry an empty `target_url` here; their real `base_url`
-    // egress is vetted at dial time (strict egress guard) and at config-set time,
-    // so they are skipped at this sink. MCP `proxy://` targets are a virtual
-    // identifier here too, not a network address (the gateway resolves the real
-    // REST backend and dispatches it further down this function); that backend's
-    // `base_url` is already vetted with `validate_resolved_url` when the MCP proxy
-    // is created/updated, so it is also skipped at this sink rather than
-    // DNS-resolving the placeholder host and failing closed on every request.
-    let is_mcp_proxy_target = target_url.starts_with("proxy://");
-    // A request carrying the grant of a Target bound by external consent goes
-    // to the URL its route decided.
-    let target_url = match target_grant.as_ref() {
-        Some(route) => route.target_url().to_string(),
-        None => target_url,
-    };
-    let mut forward_client: Option<reqwest::Client> = target_grant
-        .as_ref()
-        .map(|route| route.client().clone());
-    if forward_client.is_none() && !is_a2a_proxy_target && !is_mcp_proxy_target {
-        match pinned_target_client(&state, &channel_name, &target_url, &audit_facts).await {
-            Ok(client) => forward_client = Some(client),
-            Err(blocked) => return Ok(blocked),
+            // Track task metrics: decrement active connections
+            if let (Some(_task_monitor), Some(task_id)) = (&state.task_monitor, &state.task_id) {
+                info!(channel = channel_name, task_id = task_id, "Recording direct response connection metrics");
+                connection_guard
+                    .decrement()
+                    .await;
+            }
+
+            return Ok(direct_response);
         }
-    }
+    };
 
     if !is_a2a_proxy_target {
         debug!(channel = channel_name, target = %loggable::url(&target_url), "Forwarding to upstream");
@@ -6277,7 +6304,8 @@ async fn proxy_handler_with_mcp_runtime(
     // redirect-disabled client built at the SSRF vetting sink above; only the
     // MCP `proxy://` skip (never DNS-resolved here) falls back to the pooled
     // client, and A2A-proxy targets returned earlier.
-    let forward_client = forward_client
+    let vetted_forward_client = forward_client;
+    let forward_client = vetted_forward_client
         .as_ref()
         .unwrap_or(&state.client);
     let mut upstream_req = forward_client
@@ -7715,8 +7743,26 @@ async fn proxy_handler_with_mcp_runtime(
             sse_status
         );
 
+        // The Legacy SSE session goes to the addresses the forward vetted, over
+        // the same pinned, redirect-disabled client; a cached session pinned to
+        // other addresses is not reused.
+        let (Some(sse_client), Some(sse_addrs)) = (vetted_forward_client.as_ref(), forward_addrs.as_deref()) else {
+            warn!(surface = %channel_name, "SSE fallback has no vetted client for the target");
+            crate::audit::request_events::request_rejected(
+                &audit_facts,
+                crate::audit::request_events::RejectionStage::Forward,
+                crate::audit::request_events::RejectionReason::SsrfBlocked,
+                403,
+                None,
+            );
+            connection_guard
+                .decrement()
+                .await;
+            return Ok(create_error_response(StatusCode::FORBIDDEN, "Request blocked by egress policy"));
+        };
         match crate::mcp::sse_transport::send_via_persistent_sse(
-            &state.client,
+            sse_client,
+            sse_addrs,
             &state.surface.target.endpoint,
             &body_bytes,
             &channel_name,
@@ -14824,8 +14870,8 @@ fn extended_agent_card_refusal(rpc_request_id: Option<&serde_json::Value>) -> Re
     crate::a2a::url_rewriter::extended_agent_card_refusal(rpc_request_id)
 }
 
-/// A redirect-disabled client pinned to the vetted address of `target_url`, or
-/// the 403 to answer when egress policy blocks it. Pinning stops DNS rebinding
+/// A redirect-disabled client pinned to the vetted addresses of `target_url`,
+/// with those addresses, or the 403 to answer when egress policy blocks it. Pinning stops DNS rebinding
 /// between vetting and connect; disabling redirects stops a 3xx from sending
 /// the request, and any credential on it, to an unvetted host. A block is
 /// recorded as a refusal; a vetting task that did not run is a gateway fault.
@@ -14834,7 +14880,7 @@ async fn pinned_target_client(
     channel_name: &str,
     target_url: &str,
     facts: &crate::audit::request_events::RequestFacts<'_>,
-) -> Result<reqwest::Client, Response> {
+) -> Result<(reqwest::Client, Vec<std::net::SocketAddr>), Response> {
     let candidate = target_url.to_string();
     let timeout = std::time::Duration::from_secs(
         state
@@ -14843,7 +14889,7 @@ async fn pinned_target_client(
             .timeout_seconds,
     );
     match tokio::task::spawn_blocking(move || crate::egress::pinned_forward_client(&candidate, timeout)).await {
-        Ok(Ok((client, _target))) => Ok(client),
+        Ok(Ok((client, target))) => Ok((client, target.addrs)),
         Ok(Err(e)) => {
             warn!(channel = channel_name, target = %loggable::url(target_url), "SSRF blocked by egress policy: {}", e);
             crate::audit::request_events::request_rejected(
@@ -22447,6 +22493,119 @@ allow if {
         assert!(fallback.contains("body_bytes="), "{fallback}");
         assert!(text.contains("SSE fallback also failed"), "{text}");
         assert!(!text.contains("tool-argument-marker"), "a log holds the request body: {text}");
+    }
+
+    /// A server that counts every request it receives and answers `200`.
+    async fn counting_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(move || {
+            let counted = counted.clone();
+            async move {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::http::StatusCode::OK
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (url, hits)
+    }
+
+    #[tokio::test]
+    async fn the_legacy_sse_fallback_does_not_follow_a_redirect() {
+        let (elsewhere, elsewhere_hits) = counting_server().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let target = format!("http://{}", listener.local_addr().unwrap());
+        let location = format!("{elsewhere}/sse");
+        let app = axum::Router::new()
+            .route(
+                "/sse",
+                axum::routing::get(move || {
+                    let location = location.clone();
+                    async move { (axum::http::StatusCode::FOUND, [(axum::http::header::LOCATION, location)]) }
+                }),
+            )
+            .fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let surface = mcp_surface("sse-fallback-redirect", &target, None);
+        let state = bare_proxy_state(surface.clone(), None);
+
+        let response = send_to_surface(
+            &state,
+            surface,
+            legacy_mcp_request("/sse-fallback-redirect", &tool_call_with_argument("value")),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(elsewhere_hits.load(std::sync::atomic::Ordering::SeqCst), 0, "the redirect was followed");
+    }
+
+    #[tokio::test]
+    async fn the_legacy_sse_fallback_connects_only_to_the_vetted_address() {
+        let target = upstream_answering_not_found().await;
+        let (elsewhere, elsewhere_hits) = counting_server().await;
+        let surface = mcp_surface("sse-fallback-pinned", &target, None);
+        let mut state = bare_proxy_state(surface.clone(), None);
+        // A pooled client whose connections land somewhere other than the
+        // address the forward vetted, as a re-resolved host would.
+        state.client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(&elsewhere).unwrap())
+            .build()
+            .unwrap();
+
+        let response = send_to_surface(
+            &state,
+            surface,
+            legacy_mcp_request("/sse-fallback-pinned", &tool_call_with_argument("value")),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(elsewhere_hits.load(std::sync::atomic::Ordering::SeqCst), 0, "the fallback left the vetted address");
+    }
+
+    #[tokio::test]
+    async fn no_payment_is_delegated_for_a_target_blocked_by_egress_policy() {
+        let delegated_surface = |endpoint: &str| -> crate::config::agent_surface::AgentSurface {
+            let mut surface = mcp_surface("delegated-payment", endpoint, None);
+            surface.target.payment_policy = Some(
+                serde_json::from_value(serde_json::json!({
+                    "type": "x402", "provider": "agent_pay",
+                    "payment_gateway_id": "payment-gateway", "payment_surface_id": "payment-surface"
+                }))
+                .unwrap(),
+            );
+            surface
+        };
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "send", "arguments": {}}});
+
+        // The payment gateway is unreachable here, so a delegation answers 502.
+        let allowed = delegated_surface("http://127.0.0.1:9/rpc");
+        let state = bare_proxy_state(allowed.clone(), None);
+        let response = send_to_surface(&state, allowed, legacy_mcp_request("/delegated-payment", &call)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("payment delegation"), "{body:?}");
+
+        let blocked = delegated_surface("http://169.254.169.254/rpc");
+        let state = bare_proxy_state(blocked.clone(), None);
+        let response = send_to_surface(&state, blocked, legacy_mcp_request("/delegated-payment", &call)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("Request blocked by egress policy"), "{body}");
+        assert!(!body.contains("payment delegation"), "{body}");
     }
 
     #[tokio::test]

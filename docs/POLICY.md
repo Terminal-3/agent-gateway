@@ -477,6 +477,19 @@ and forwards through a per-request `reqwest::Client` **pinned** to that exact
 resolved address via `resolve_to_addrs` (TLS SNI preserved) with **redirects
 disabled** — so a host cannot rebind to an internal/metadata IP between vetting
 and connect, and an upstream 3xx is returned to the caller rather than followed.
+On the inbound sink the target is vetted before a delegated (`agent_pay`) payment
+is decided, so no payment is delegated for a request whose target is refused. An
+MCP Legacy SSE fallback (a `POST` the Target rejects with `400`, `404` or `405`,
+retried over `GET /sse`) uses the same pinned client as the forward, and reuses a
+cached Legacy SSE session only when every address that session is pinned to was
+vetted for this request; otherwise it opens a new session that replaces it. The
+inbound forward, Fabric receive and MCP tool discovery share that session cache
+and all hold to this rule; none of them opens or reuses a session without the
+addresses its own vetting returned. The order of the addresses does not matter.
+A Target whose host resolves to a different set of addresses on each lookup, so
+that the cached session is pinned to an address the next lookup does not
+return, gets a new `GET /sse` and `initialize` on each such request. Reusing
+that session would send the request to an address this request did not vet.
 A2A-proxy and legacy MCP `proxy://` targets are **not** DNS-resolved/pinned here
 (vetted at dial time / MCP-proxy create time). A modern (`2026-07-28`) owned MCP
 Proxy `tools/call` dials its REST backend through a pinned, redirect-free client
@@ -551,22 +564,19 @@ TOCTOU on the remaining validate-then-connect fetch sinks.
   loopback and private receivers are allowed, cloud metadata is blocked, redirects are not followed.
   The mediator directory request (`AG_MEDIATOR_DIRECTORY_URL`, [`INTEGRATIONS.md`](INTEGRATIONS.md#mediator-directory))
   uses the same client and the same rules.
-- `egress::pinned_forward_client` also pins the **agent-card fetch** from an
-  `http(s)` surface target whenever it carries `target.auth`
-  (`src/proxy/handler/agent_card.rs`), so the
-  credential cannot follow a 3xx to another host. A 3xx answers `502`
-  "Upstream redirected"; a blocked target answers `403` "Request blocked by
-  egress policy". It shares the `pinned_target_client` helper with the
-  inbound forward step. Without `target.auth` the fetch
-  uses the shared proxy client, which returns a 3xx rather than following it
-  but is not pinned.
+- `egress::pinned_forward_client` also pins the served **agent-card fetch** from
+  an `http(s)` surface target (`src/proxy/handler/agent_card.rs`), with or
+  without `target.auth`, through the `pinned_target_client` helper it shares
+  with the inbound forward step. A 3xx answers `502` "Upstream redirected". A
+  target that fails vetting, whether its address is blocked or its host does
+  not resolve, answers `403` "Request blocked by egress policy" and is recorded
+  as a refused request, as on the forward.
 - The [agent card preview](PROTOCOLS.md#agent-card-preview) builds the same card
   but always fetches an `http(s)` Target over `egress::pinned_forward_client`, with
   or without `target.auth`, and records nothing; a blocked target reports
   `blocked_by_egress` (`403`), and a host that does not resolve reports `unreachable`
-  (`502`). The served card route reports such a host as unreachable only when it fetches
-  without `target.auth`; a served fetch with `target.auth` (`pinned_target_client`) and the
-  proxy forward still answer `403` "Request blocked by egress policy" for it.
+  (`502`), which tells the operator the two apart. The served card route and the proxy
+  forward (`pinned_target_client`) answer `403` "Request blocked by egress policy" for both.
 - Fabric receive's **agent-card hop** to the local Target, made for the GW2
   policy context, uses the forward's `forward_client_for`
   (`egress::pinned_forward_client` for an `http(s)` Target), so it is pinned
@@ -718,9 +728,6 @@ documented here so operators can assess exposure.
   to loopback, an unspecified address or cloud metadata after validation is
   refused. It does not refuse a rebind to an RFC 1918 address, because that
   policy allows RFC 1918.
-- **The process-wide Legacy-SSE session cache** (keyed by `base_url`) can reuse a
-  non-discovery session's client for a discovery GET. The POST origin-lock closes
-  the metadata vector regardless, but the reused GET leg is not pinned.
 - **Global (appliance-wide) enforcement covers inbound PEPs only.** The outbound
   and secondary surface-variant PEPs do not evaluate the appliance-wide policy
   set, and neither does the `fabric://` send leg for the surface plane: a direct
