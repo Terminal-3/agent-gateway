@@ -816,8 +816,7 @@ impl Drop for UpstreamSseSessionInner {
 /// Handle to a persistent upstream SSE session.
 pub struct UpstreamSseSession {
     inner: Arc<UpstreamSseSessionInner>,
-    /// The vetted addresses the session's client is pinned to; empty when it
-    /// was opened without them.
+    /// The vetted addresses the session's client is pinned to.
     pinned_addrs: Vec<SocketAddr>,
 }
 
@@ -1006,20 +1005,18 @@ impl UpstreamSseSession {
 
     /// Whether the session may carry a request whose target was vetted to
     /// `vetted_addrs`: every address its client is pinned to must be one of
-    /// them. A request with no vetted addresses accepts any session.
+    /// them. A session pinned to no address carries nothing.
     fn may_carry(
         &self,
-        vetted_addrs: Option<&[SocketAddr]>,
+        vetted_addrs: &[SocketAddr],
     ) -> bool {
-        vetted_addrs.is_none_or(|vetted| {
-            !self
+        !self
+            .pinned_addrs
+            .is_empty()
+            && self
                 .pinned_addrs
-                .is_empty()
-                && self
-                    .pinned_addrs
-                    .iter()
-                    .all(|addr| vetted.contains(addr))
-        })
+                .iter()
+                .all(|addr| vetted_addrs.contains(addr))
     }
 
     /// Returns `true` if the background SSE reader is still running.
@@ -1191,7 +1188,7 @@ impl UpstreamSseSessionManager {
     pub async fn get_or_connect(
         &self,
         client: &reqwest::Client,
-        vetted_addrs: Option<&[SocketAddr]>,
+        vetted_addrs: &[SocketAddr],
         base_url: &str,
         channel_name: &str,
         max_event_bytes: usize,
@@ -1220,9 +1217,7 @@ impl UpstreamSseSessionManager {
         }
 
         let mut session = UpstreamSseSession::connect(client, base_url, channel_name, max_event_bytes).await?;
-        session.pinned_addrs = vetted_addrs
-            .map(<[SocketAddr]>::to_vec)
-            .unwrap_or_default();
+        session.pinned_addrs = vetted_addrs.to_vec();
         let session = Arc::new(session);
         sessions.insert(base_url.to_string(), session.clone());
         Ok(session)
@@ -1242,7 +1237,7 @@ pub static UPSTREAM_SSE_SESSIONS: std::sync::LazyLock<UpstreamSseSessionManager>
 /// `client` is pinned to; see [`UpstreamSseSessionManager::get_or_connect`].
 pub async fn send_via_persistent_sse(
     client: &reqwest::Client,
-    vetted_addrs: Option<&[SocketAddr]>,
+    vetted_addrs: &[SocketAddr],
     base_url: &str,
     json_rpc_body: &[u8],
     channel_name: &str,
@@ -1382,111 +1377,57 @@ mod tests {
     /// address opens a new session, which replaces the cached one.
     #[tokio::test]
     async fn a_cached_legacy_sse_session_is_reused_only_for_its_vetted_addresses() {
-        use axum::extract::Query;
-        use axum::response::sse::Event;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::sync::mpsc;
-
-        type Streams = Arc<Mutex<HashMap<usize, mpsc::Sender<Event>>>>;
-        let streams: Streams = Arc::default();
-        let connections = Arc::new(AtomicUsize::new(0));
-        let app = axum::Router::new()
-            .route(
-                "/sse",
-                axum::routing::get({
-                    let streams = streams.clone();
-                    let connections = connections.clone();
-                    move || {
-                        let streams = streams.clone();
-                        let session = connections.fetch_add(1, Ordering::SeqCst);
-                        async move {
-                            let (events, receiver) = mpsc::channel::<Event>(16);
-                            streams
-                                .lock()
-                                .await
-                                .insert(session, events);
-                            let endpoint = futures::stream::once(async move {
-                                Event::default()
-                                    .event("endpoint")
-                                    .data(format!("/messages?session={session}"))
-                            });
-                            Sse::new(
-                                endpoint
-                                    .chain(ReceiverStream::new(receiver))
-                                    .map(Ok::<_, Infallible>),
-                            )
-                        }
-                    }
-                }),
-            )
-            .route(
-                "/messages",
-                axum::routing::post(
-                    move |Query(query): Query<HashMap<String, usize>>,
-                          axum::Json(request): axum::Json<serde_json::Value>| {
-                        let streams = streams.clone();
-                        async move {
-                            if request.get("id").is_some() {
-                                let events = streams.lock().await[&query["session"]].clone();
-                                let answer = serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": {}});
-                                events
-                                    .send(Event::default().data(answer.to_string()))
-                                    .await
-                                    .unwrap();
-                            }
-                            axum::http::StatusCode::ACCEPTED
-                        }
-                    },
-                ),
-            );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await });
-        let base_url = format!("http://{address}");
+        let target = crate::component_tests::helpers::LegacySseTarget::start().await;
+        let base_url = target.url.clone();
         let first: SocketAddr = "192.0.2.1:443".parse().unwrap();
         let second: SocketAddr = "192.0.2.2:443".parse().unwrap();
         let client = reqwest::Client::new();
         let manager = UpstreamSseSessionManager::new();
-        let session = |vetted: Option<&[SocketAddr]>| {
+        let session = |vetted: &[SocketAddr]| {
             let manager = &manager;
             let client = &client;
             let base_url = base_url.clone();
-            let vetted = vetted.map(<[SocketAddr]>::to_vec);
+            let vetted = vetted.to_vec();
             async move {
                 manager
-                    .get_or_connect(client, vetted.as_deref(), &base_url, "test", 1024 * 1024)
+                    .get_or_connect(client, &vetted, &base_url, "test", 1024 * 1024)
                     .await
                     .expect("the session connects")
             }
         };
 
-        let pinned_first = session(Some(&[first])).await;
-        let again = session(Some(&[first])).await;
+        let pinned_first = session(&[first]).await;
+        let again = session(&[first]).await;
         assert!(Arc::ptr_eq(&pinned_first, &again), "the same vetted address reuses the session");
 
-        let pinned_second = session(Some(&[second])).await;
+        let pinned_second = session(&[second]).await;
         assert!(!Arc::ptr_eq(&pinned_first, &pinned_second), "another vetted address reused the cached session");
-        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        assert_eq!(target.connections(), 2);
 
-        let among = session(Some(&[first, second])).await;
+        let among = session(&[first, second]).await;
         assert!(Arc::ptr_eq(&pinned_second, &among), "a session pinned among the vetted addresses is reused");
-        let unvetted = session(None).await;
-        assert!(Arc::ptr_eq(&pinned_second, &unvetted), "a request with no vetted addresses reuses any session");
-        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        assert_eq!(target.connections(), 2);
 
-        let unpinned_manager = UpstreamSseSessionManager::new();
-        let unpinned = unpinned_manager
-            .get_or_connect(&client, None, &base_url, "test", 1024 * 1024)
+        let reordered = session(&[second, first]).await;
+        assert!(Arc::ptr_eq(&among, &reordered), "the order of the vetted addresses changed the session");
+        assert_eq!(target.connections(), 2);
+
+        let pinned_both = UpstreamSseSessionManager::new();
+        let both = pinned_both
+            .get_or_connect(&client, &[first, second], &base_url, "test", 1024 * 1024)
             .await
             .unwrap();
-        let pinned = unpinned_manager
-            .get_or_connect(&client, Some(&[first]), &base_url, "test", 1024 * 1024)
+        let narrower = pinned_both
+            .get_or_connect(&client, &[first], &base_url, "test", 1024 * 1024)
             .await
             .unwrap();
-        assert!(!Arc::ptr_eq(&unpinned, &pinned), "a session opened without vetted addresses was reused");
-        assert_eq!(connections.load(Ordering::SeqCst), 4);
+        assert!(!Arc::ptr_eq(&both, &narrower), "a session pinned outside the vetted set was reused");
+        assert_eq!(target.connections(), 4);
+
+        let unpinned = session(&[]).await;
+        let unpinned_again = session(&[]).await;
+        assert!(!Arc::ptr_eq(&unpinned, &unpinned_again), "a session pinned to no address was reused");
+        assert_eq!(target.connections(), 6);
     }
 
     /// Only a response answers a waiter: a server request or a string id that

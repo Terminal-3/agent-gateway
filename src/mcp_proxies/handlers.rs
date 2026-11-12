@@ -622,10 +622,11 @@ pub async fn discover_mcp_tools<S: McpProxyStore>(
         let target_endpoint = crate::url_validation::validate_resolved_url(target_endpoint)
             .map_err(|error| (StatusCode::BAD_REQUEST, format!("Invalid MCP target endpoint: {error}")))?;
 
-        let pinned_client = pin_discovery_client(target_endpoint.as_str()).await?;
+        let (pinned_client, vetted_addrs) = pin_discovery_client(target_endpoint.as_str()).await?;
 
         discover_remote_tools(
             &pinned_client,
+            &vetted_addrs,
             target_endpoint.as_str(),
             request.target_auth.as_ref(),
             &secrets_store,
@@ -645,7 +646,9 @@ pub async fn discover_mcp_tools<S: McpProxyStore>(
 /// cannot rebind to an internal/metadata IP between validation and connect
 /// (SSRF rebinding TOCTOU). The resolved IP stays log-only; the caller-facing
 /// error keeps the generic "Invalid MCP target endpoint" message.
-async fn pin_discovery_client(target_endpoint: &str) -> Result<reqwest::Client, (StatusCode, String)> {
+async fn pin_discovery_client(
+    target_endpoint: &str,
+) -> Result<(reqwest::Client, Vec<std::net::SocketAddr>), (StatusCode, String)> {
     let raw = target_endpoint.to_string();
     let pinned = tokio::task::spawn_blocking(move || {
         crate::egress::pinned_strict_client(
@@ -662,7 +665,7 @@ async fn pin_discovery_client(target_endpoint: &str) -> Result<reqwest::Client, 
     match pinned {
         Ok((client, target)) => {
             debug!(addrs = ?target.addrs, "Pinned MCP discovery client to vetted address");
-            Ok(client)
+            Ok((client, target.addrs))
         }
         Err(error) => {
             warn!(%error, "MCP discovery target endpoint blocked by egress policy");
@@ -738,6 +741,7 @@ async fn discover_proxy_tools<S: McpProxyStore>(
 
 async fn discover_remote_tools(
     client: &reqwest::Client,
+    vetted_addrs: &[std::net::SocketAddr],
     target_endpoint: &str,
     target_auth: Option<&DiscoverTargetAuthConfig>,
     secrets_store: &Option<Arc<dyn crate::secrets::SecretsStore>>,
@@ -761,7 +765,7 @@ async fn discover_remote_tools(
         }
     });
     let initialize_response =
-        send_discovery_request(client, target_endpoint, initialize_request, channel_name, extra_headers.as_ref())
+        send_discovery_request(client, vetted_addrs, target_endpoint, initialize_request, channel_name, extra_headers.as_ref())
             .await?;
     ensure_jsonrpc_success(&initialize_response)?;
 
@@ -770,11 +774,12 @@ async fn discover_remote_tools(
         "method": "notifications/initialized"
     });
     let _ =
-        send_discovery_request(client, target_endpoint, initialized_notification, channel_name, extra_headers.as_ref())
+        send_discovery_request(client, vetted_addrs, target_endpoint, initialized_notification, channel_name, extra_headers.as_ref())
             .await;
 
     let tool_list_response = send_discovery_request(
         client,
+        vetted_addrs,
         target_endpoint,
         serde_json::json!({
             "jsonrpc": "2.0",
@@ -807,6 +812,7 @@ async fn discover_remote_tools(
 
 async fn send_discovery_request(
     client: &reqwest::Client,
+    vetted_addrs: &[std::net::SocketAddr],
     target_endpoint: &str,
     request: serde_json::Value,
     channel_name: &str,
@@ -838,7 +844,7 @@ async fn send_discovery_request(
             if matches!(status.as_u16(), 400 | 404 | 405) {
                 return crate::mcp::sse_transport::send_via_persistent_sse(
                     client,
-                    None,
+                    vetted_addrs,
                     target_endpoint,
                     request_body.as_ref(),
                     channel_name,
@@ -2839,7 +2845,7 @@ pub async fn handle_mcp_request_with_policies(
 mod tests {
     use super::{
         DiscoverMcpToolsRequest, discovery_secret_allowed, ensure_jsonrpc_success, mcp_proxy_allowed,
-        pin_discovery_client, resolve_proxy_id, tool_call_failure,
+        pin_discovery_client, resolve_proxy_id, send_discovery_request, tool_call_failure,
     };
     use crate::mcp_proxies::McpProxyStore;
     use axum::http::StatusCode;
@@ -4776,6 +4782,32 @@ mod tests {
     fn discovery_target_validation_rejects_cloud_metadata_and_loopback() {
         assert!(crate::url_validation::validate_resolved_url("http://169.254.169.254/latest/meta-data").is_err());
         assert!(crate::url_validation::validate_resolved_url("http://127.0.0.1:8080/mcp").is_err());
+    }
+
+    /// Discovery's Legacy SSE fallback reuses a cached session only when it is
+    /// pinned to addresses discovery vetted for this request.
+    #[tokio::test]
+    async fn discovery_reuses_a_legacy_sse_session_only_for_its_vetted_addresses() {
+        let target = crate::component_tests::helpers::LegacySseTarget::start().await;
+        let client = reqwest::Client::new();
+        let elsewhere: std::net::SocketAddr = "192.0.2.1:443"
+            .parse()
+            .unwrap();
+        crate::mcp::sse_transport::UPSTREAM_SSE_SESSIONS
+            .get_or_connect(&client, &[elsewhere], &target.url, "test", 1024 * 1024)
+            .await
+            .unwrap();
+        let tools_list = || serde_json::json!({"jsonrpc": "2.0", "id": "tools-list", "method": "tools/list"});
+
+        send_discovery_request(&client, &[target.address], &target.url, tools_list(), "test", None)
+            .await
+            .expect("discovery answers over a new session");
+        assert_eq!(target.connections(), 2, "discovery reused a session pinned to an address it did not vet");
+
+        send_discovery_request(&client, &[target.address], &target.url, tools_list(), "test", None)
+            .await
+            .expect("discovery answers over its own session");
+        assert_eq!(target.connections(), 2, "discovery did not reuse the session pinned to its vetted address");
     }
 
     #[tokio::test]

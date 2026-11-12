@@ -7762,7 +7762,7 @@ async fn proxy_handler_with_mcp_runtime(
         };
         match crate::mcp::sse_transport::send_via_persistent_sse(
             sse_client,
-            Some(sse_addrs),
+            sse_addrs,
             &state.surface.target.endpoint,
             &body_bytes,
             &channel_name,
