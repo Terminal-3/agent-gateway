@@ -370,6 +370,32 @@ impl<'surface> LocalPayment<'surface> {
     }
 }
 
+/// Whether the surface's local payment gate prices this request, so that
+/// [`process`] would verify or settle a payment for it.
+pub(super) fn prices(
+    state: &ProxyState,
+    headers: &HeaderMap,
+    body: &[u8],
+    mcp_context: Option<&McpContext>,
+) -> bool {
+    let inspected = LocalPayment::inspect(
+        &state.surface,
+        headers,
+        body,
+        mcp_context,
+        &state
+            .config
+            .x402_headers
+            .payment_signature,
+    );
+    inspected
+        .x402
+        .is_some()
+        || inspected
+            .mpp
+            .is_some()
+}
+
 pub(super) fn is_unpaid(
     state: &ProxyState,
     headers: &HeaderMap,

@@ -485,6 +485,18 @@ blocked target fails closed (inbound
 and Fabric receive `403` "Request blocked by egress policy"; outbound
 `TargetAuthUnavailable`) with the resolved IP log-only.
 
+On the inbound Access Point the vetting runs only for a request the gateway forwards: a request
+it answers itself, such as an MCP notification, never resolves the target. It starts once the
+request is known not to be answered locally and runs on a blocking thread alongside identity,
+Trust Check and policy, and its result is awaited after the policy gates and before a modern
+MCP request's payment (delegated or local), credential delegation, target authentication and the
+upstream request. When the surface's local payment gate prices the request, it is awaited before
+that payment is processed instead. Payment delegated to a payment gateway for any other request
+is decided at admission, ahead of the vetting. So a request that is refused earlier (body size, an MCP local answer, identity, Trust
+Check, policy or tool gating) gets that refusal even when its target is also blocked; a blocked
+target that passes all of them gets the `403` and its `request_rejected` record. A vetting whose
+request is refused first is dropped, and its client is never used.
+
 A Transit Point request that carries a grant by binding (`consent_mode: external`) is held to
 more: the outbound forward sends it only to the origin of its provider's `resource`, through
 `egress::pinned_vendor_client` (the Strict policy, `https` only), and never over Fabric. See
@@ -556,7 +568,7 @@ TOCTOU on the remaining validate-then-connect fetch sinks.
   (`src/proxy/handler/agent_card.rs`), so the
   credential cannot follow a 3xx to another host. A 3xx answers `502`
   "Upstream redirected"; a blocked target answers `403` "Request blocked by
-  egress policy". It shares the `pinned_target_client` helper with the
+  egress policy". It shares the `TargetVetting` helper (`src/proxy/handler/target_vetting.rs`) with the
   inbound forward step. Without `target.auth` the fetch
   uses the shared proxy client, which returns a 3xx rather than following it
   but is not pinned.
@@ -565,7 +577,7 @@ TOCTOU on the remaining validate-then-connect fetch sinks.
   or without `target.auth`, and records nothing; a blocked target reports
   `blocked_by_egress` (`403`), and a host that does not resolve reports `unreachable`
   (`502`). The served card route reports such a host as unreachable only when it fetches
-  without `target.auth`; a served fetch with `target.auth` (`pinned_target_client`) and the
+  without `target.auth`; a served fetch with `target.auth` (`TargetVetting`) and the
   proxy forward still answer `403` "Request blocked by egress policy" for it.
 - Fabric receive's **agent-card hop** to the local Target, made for the GW2
   policy context, uses the forward's `forward_client_for`

@@ -672,19 +672,18 @@ impl TargetCardFetch<'_> {
         if !credential_sent {
             return Ok(state.client.clone());
         }
-        super::pinned_target_client(
-            state,
-            channel_name,
-            target_url,
-            &crate::audit::request_events::RequestFacts {
-                surface_id: &state.surface.surface_id,
+        super::target_vetting::TargetVetting::start(state, channel_name, target_url)
+            .finish(
                 channel_name,
-                trace_id: None,
-                via_fabric: false,
-            },
-        )
-        .await
-        .map_err(|response| self.fail(FetchFault::BlockedByEgress, response))
+                &crate::audit::request_events::RequestFacts {
+                    surface_id: &state.surface.surface_id,
+                    channel_name,
+                    trace_id: None,
+                    via_fabric: false,
+                },
+            )
+            .await
+            .map_err(|response| self.fail(FetchFault::BlockedByEgress, response))
     }
 
     async fn fetch_over_http(
