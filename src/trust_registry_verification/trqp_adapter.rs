@@ -23,11 +23,15 @@
 //!   transport timeout, and a transport-level elapse surfaces through this
 //!   branch instead.
 //!
+//! Identical queries in flight at the same time share one send; see
+//! [`crate::trust_registry_verification::trqp_in_flight`].
+//!
 //! Keeping the three failure shapes distinct preserves the spec's
 //! clean-denied vs error partition: a registry that signals "not
 //! recognised" via a problem-report is observable separately from a
 //! schema/version drift (parse error) and a low-level transport error.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -35,6 +39,7 @@ use async_trait::async_trait;
 use crate::trust_registries::TrustRegistryListenerManager;
 use crate::trust_registries::communication::TrustRegistryError;
 use crate::trust_registries::types::TrqpQueryRequest;
+use crate::trust_registry_verification::trqp_in_flight::QueryKey;
 use crate::trust_registry_verification::trust_check_element::{TrqpQueryParams, TrqpQueryType};
 use crate::trust_registry_verification::trust_check_executor::{TrqpClient, TrqpClientError, TrqpOutcome};
 
@@ -107,6 +112,17 @@ impl TrqpClient for TrqpListenerClient {
         query_type: TrqpQueryType,
         params: &TrqpQueryParams,
     ) -> Result<TrqpOutcome, TrqpClientError> {
+        self.query_shared(registry_id, query_type, params, &AtomicBool::new(false))
+            .await
+    }
+
+    async fn query_shared(
+        &self,
+        registry_id: &str,
+        query_type: TrqpQueryType,
+        params: &TrqpQueryParams,
+        joined: &AtomicBool,
+    ) -> Result<TrqpOutcome, TrqpClientError> {
         let registry_did = self
             .manager
             .registry_did_for(registry_id)
@@ -116,21 +132,37 @@ impl TrqpClient for TrqpListenerClient {
             })?;
 
         let request = build_request(query_type, params);
-
-        match query_type {
-            TrqpQueryType::Authorization => self
-                .manager
-                .query_authorization(&registry_did, &request)
-                .await
-                .map(map_authorization_outcome)
-                .map_err(map_error),
-            TrqpQueryType::Recognition => self
-                .manager
-                .query_recognition(&registry_did, &request)
-                .await
-                .map(map_recognition_outcome)
-                .map_err(map_error),
+        let key = QueryKey::new(registry_id, &registry_did, query_type, &request);
+        let query = send_query(Arc::clone(&self.manager), registry_did, query_type, request);
+        match key {
+            Some(key) => {
+                self.manager
+                    .trqp_in_flight()
+                    .run(key, query, joined)
+                    .await
+            }
+            None => query.await,
         }
+    }
+}
+
+async fn send_query(
+    manager: Arc<TrustRegistryListenerManager>,
+    registry_did: String,
+    query_type: TrqpQueryType,
+    request: TrqpQueryRequest,
+) -> Result<TrqpOutcome, TrqpClientError> {
+    match query_type {
+        TrqpQueryType::Authorization => manager
+            .query_authorization(&registry_did, &request)
+            .await
+            .map(map_authorization_outcome)
+            .map_err(map_error),
+        TrqpQueryType::Recognition => manager
+            .query_recognition(&registry_did, &request)
+            .await
+            .map(map_recognition_outcome)
+            .map_err(map_error),
     }
 }
 

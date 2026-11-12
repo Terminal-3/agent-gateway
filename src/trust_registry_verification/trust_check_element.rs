@@ -35,7 +35,7 @@ pub const TRUST_CHECK_NAME_MAX_CODE_POINTS: usize = 64;
 pub const TRUST_CHECK_ID_MAX_CODE_POINTS: usize = 64;
 
 /// TRQP query family supported in v1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrqpQueryType {
     /// "Is `entity_id` authorised by `authority_id` to perform `action`

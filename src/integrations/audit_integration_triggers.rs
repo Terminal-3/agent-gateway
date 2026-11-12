@@ -529,6 +529,7 @@ mod tests {
                 ok: true,
                 error_code: None,
                 transit_point: None,
+                joined_in_flight: false,
             },
             DelegationAuditAction::ConfigObject {
                 kind: "surface".to_string(),

@@ -633,6 +633,8 @@ pub struct TrustRegistryListenerManager {
     /// The timed-out query threads of each registry, shared by every connection
     /// built for it.
     timed_out_queries: std::sync::Mutex<HashMap<BuildKey, TimedOutQueries>>,
+    /// The TRQP queries awaiting an answer, shared between identical requests.
+    trqp_in_flight: crate::trust_registry_verification::trqp_in_flight::InFlightQueries,
     self_ref: Weak<Self>,
 }
 
@@ -664,6 +666,7 @@ impl TrustRegistryListenerManager {
             retries: Mutex::new(HashMap::new()),
             retry_policy,
             timed_out_queries: std::sync::Mutex::new(HashMap::new()),
+            trqp_in_flight: Default::default(),
             self_ref: self_ref.clone(),
         })
     }
@@ -1612,6 +1615,10 @@ impl TrustRegistryListenerManager {
                     || tr.registry_did.as_deref() == Some(did)
                     || tr.did.as_deref() == Some(did)
             }))
+    }
+
+    pub(crate) fn trqp_in_flight(&self) -> &crate::trust_registry_verification::trqp_in_flight::InFlightQueries {
+        &self.trqp_in_flight
     }
 
     /// The DID queries for a stored registry are addressed to: its live

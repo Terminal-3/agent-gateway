@@ -1,0 +1,16 @@
+branch: gateway-trust-dedupe-agent-gateway-errol
+changes:
+  added: []
+  changed:
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Share identical in-flight Trust Check queries between requests
+      description: >-
+        Requests that would send the same TRQP query while one is already waiting for its answer
+        now await that query instead of sending their own, so concurrent requests from one agent
+        cost one registry round trip. Nothing is cached once the answer is delivered, failures
+        and timeouts fail every waiting request, and each request still writes its own
+        trust_check audit record, marked joined_in_flight when it shared a query.
+  fixed: []
+  removed: []
+  security: []
+  breaking: []

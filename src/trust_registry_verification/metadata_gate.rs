@@ -153,6 +153,7 @@ pub fn synthesize_metadata_gate_failures<'o>(
                     leg,
                     element_id: elem.id.as_str(),
                     element_name: elem.name.as_deref(),
+                    joined_in_flight: false,
                     authority_id: None,
                     entity_id: None,
                     action: Some(&result.action),

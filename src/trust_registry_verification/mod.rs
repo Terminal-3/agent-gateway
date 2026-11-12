@@ -6,6 +6,7 @@ pub mod recorder_status;
 pub mod stage;
 pub mod template;
 pub mod trqp_adapter;
+pub(crate) mod trqp_in_flight;
 pub mod trust_check_element;
 pub mod trust_check_executor;
 pub mod trust_recorder;
