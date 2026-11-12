@@ -2,20 +2,23 @@
 //! same time.
 //!
 //! The first request for a [`QueryKey`] spawns the query in its own task;
-//! requests with the same key that arrive before that task finishes await the
-//! same answer. The task removes its entry before its answer becomes visible,
-//! so an answer is never handed to a request that arrives after it was
-//! delivered: nothing is cached.
+//! requests with the same key that arrive less than [`MAX_JOIN_AGE`] after it
+//! was started, and before that task finishes, await the same answer. A request
+//! that finds an older entry starts a new query, whose entry takes the key; the
+//! older query still answers the requests already awaiting it. The task removes
+//! its entry before its answer becomes visible, so an answer is never handed to
+//! a request that arrives after it was delivered: nothing is cached.
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared};
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 use tracing::Instrument;
 
 use crate::trust_registries::types::TrqpQueryRequest;
@@ -30,9 +33,21 @@ const MAX_IN_FLIGHT: usize = 1024;
 /// request awaiting it, and its entry is removed.
 const MAX_QUERY_TIME: Duration = Duration::from_secs(30);
 
+/// Oldest a shared query may be for a request to join it. A request that finds
+/// an older one sends its own query.
+const MAX_JOIN_AGE: Duration = Duration::from_secs(2);
+
 type QueryResult = Result<TrqpOutcome, TrqpClientError>;
 type SharedQuery = Shared<BoxFuture<'static, QueryResult>>;
-type Entries = Arc<Mutex<HashMap<QueryKey, SharedQuery>>>;
+type Entries = Arc<Mutex<HashMap<QueryKey, Entry>>>;
+
+/// A shared query in the map. `id` is unique per started query, so a query's
+/// cleanup removes only its own entry and never one that replaced it.
+struct Entry {
+    id: u64,
+    started: Instant,
+    query: SharedQuery,
+}
 
 /// Identity of a query as sent: the registry it goes to and the exact
 /// serialised request body.
@@ -68,13 +83,15 @@ impl QueryKey {
 /// each listener manager owns its own instance.
 pub(crate) struct InFlightQueries {
     entries: Entries,
+    next_id: AtomicU64,
     capacity: usize,
     time_limit: Duration,
+    join_age: Duration,
 }
 
 impl Default for InFlightQueries {
     fn default() -> Self {
-        Self::new(MAX_IN_FLIGHT, MAX_QUERY_TIME)
+        Self::new(MAX_IN_FLIGHT, MAX_QUERY_TIME, MAX_JOIN_AGE)
     }
 }
 
@@ -82,11 +99,14 @@ impl InFlightQueries {
     fn new(
         capacity: usize,
         time_limit: Duration,
+        join_age: Duration,
     ) -> Self {
         Self {
             entries: Arc::default(),
+            next_id: AtomicU64::new(0),
             capacity,
             time_limit,
+            join_age,
         }
     }
 
@@ -111,7 +131,7 @@ impl InFlightQueries {
     }
 
     /// Returns the query to await and whether it was joined, or hands
-    /// `query` back when the map is full.
+    /// `query` back when the map is full and holds no entry for `key`.
     fn join_or_start<F>(
         &self,
         key: QueryKey,
@@ -121,13 +141,18 @@ impl InFlightQueries {
         F: Future<Output = QueryResult> + Send + 'static,
     {
         let (answer, answered) = oneshot::channel();
+        let id = self
+            .next_id
+            .fetch_add(1, Ordering::Relaxed);
         let shared = {
             let mut entries = lock(&self.entries);
-            if let Some(shared) = entries.get(&key) {
-                return Ok((shared.clone(), true));
-            }
-            if entries.len() >= self.capacity {
-                return Err(query);
+            match entries.get(&key) {
+                Some(entry) if entry.started.elapsed() < self.join_age => {
+                    return Ok((entry.query.clone(), true));
+                }
+                Some(_) => {}
+                None if entries.len() >= self.capacity => return Err(query),
+                None => {}
             }
             let shared = answered
                 .map(|answer| {
@@ -139,7 +164,11 @@ impl InFlightQueries {
                 })
                 .boxed()
                 .shared();
-            entries.insert(key.clone(), shared.clone());
+            entries.insert(key.clone(), Entry {
+                id,
+                started: Instant::now(),
+                query: shared.clone(),
+            });
             shared
         };
         // Spawned with the map unlocked: a runtime that is shutting down
@@ -148,6 +177,7 @@ impl InFlightQueries {
             entry: EntryGuard {
                 entries: Arc::clone(&self.entries),
                 key,
+                id,
             },
             answer,
         };
@@ -195,21 +225,29 @@ impl Delivery {
     }
 }
 
-/// Removes its entry from the map when dropped.
+/// Removes its entry from the map when dropped, unless a newer query has
+/// taken the key.
 struct EntryGuard {
     entries: Entries,
     key: QueryKey,
+    id: u64,
 }
 
 impl Drop for EntryGuard {
     fn drop(&mut self) {
-        lock(&self.entries).remove(&self.key);
+        let mut entries = lock(&self.entries);
+        if entries
+            .get(&self.key)
+            .is_some_and(|entry| entry.id == self.id)
+        {
+            entries.remove(&self.key);
+        }
     }
 }
 
-/// Every critical section is a single map insert or remove, so a poisoned
-/// map is still consistent.
-fn lock(entries: &Mutex<HashMap<QueryKey, SharedQuery>>) -> MutexGuard<'_, HashMap<QueryKey, SharedQuery>> {
+/// Every critical section is a single map lookup, insert or remove, so a
+/// poisoned map is still consistent.
+fn lock(entries: &Mutex<HashMap<QueryKey, Entry>>) -> MutexGuard<'_, HashMap<QueryKey, Entry>> {
     entries
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -470,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_full_map_sends_unshared() {
-        let in_flight = InFlightQueries::new(1, MAX_QUERY_TIME);
+        let in_flight = InFlightQueries::new(1, MAX_QUERY_TIME, MAX_JOIN_AGE);
         let sends = Arc::new(AtomicUsize::new(0));
         let (release, gate) = oneshot::channel();
         let (_unused_release, unused_gate) = oneshot::channel();
@@ -517,9 +555,115 @@ mod tests {
         assert_eq!(in_flight.len(), 0);
     }
 
+    /// Runs a request on its own task; resolves to its answer and whether it
+    /// joined another request's query.
+    fn spawn_request(
+        in_flight: &Arc<InFlightQueries>,
+        query: impl Future<Output = QueryResult> + Send + 'static,
+    ) -> tokio::task::JoinHandle<(QueryResult, bool)> {
+        let in_flight = Arc::clone(in_flight);
+        tokio::spawn(async move {
+            let joined = AtomicBool::new(false);
+            let answer = in_flight
+                .run(key("did:web:assistant"), query, &joined)
+                .await;
+            (answer, joined.load(Ordering::Relaxed))
+        })
+    }
+
+    fn denied() -> TrqpOutcome {
+        TrqpOutcome::Denied {
+            detail: "Registry answered `authorized: false`".to_string(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_within_the_join_age_joins() {
+        let in_flight = Arc::new(InFlightQueries::default());
+        let sends = Arc::new(AtomicUsize::new(0));
+        let (release, gate) = oneshot::channel();
+
+        let leader = spawn_request(&in_flight, gated_query(&sends, gate));
+        settle().await;
+        tokio::time::sleep(MAX_JOIN_AGE - Duration::from_millis(100)).await;
+        let joiner = spawn_request(&in_flight, allowed());
+        settle().await;
+        release
+            .send(Ok(denied()))
+            .expect("query waiting");
+
+        assert_eq!(leader.await.expect("leader"), (Ok(denied()), false));
+        assert_eq!(joiner.await.expect("joiner"), (Ok(denied()), true));
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        assert_eq!(in_flight.len(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_past_the_join_age_sends_its_own_query_which_later_requests_join() {
+        let in_flight = Arc::new(InFlightQueries::default());
+        let sends = Arc::new(AtomicUsize::new(0));
+        let (old_release, old_gate) = oneshot::channel();
+        let (new_release, new_gate) = oneshot::channel();
+
+        let old = spawn_request(&in_flight, gated_query(&sends, old_gate));
+        tokio::time::sleep(MAX_JOIN_AGE).await;
+        let newer = spawn_request(&in_flight, gated_query(&sends, new_gate));
+        settle().await;
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+        assert_eq!(in_flight.len(), 1);
+
+        tokio::time::sleep(MAX_JOIN_AGE / 4).await;
+        let joins_newer = spawn_request(&in_flight, allowed());
+        settle().await;
+
+        old_release
+            .send(Ok(TrqpOutcome::Allowed))
+            .expect("old query waiting");
+        assert_eq!(old.await.expect("old"), (Ok(TrqpOutcome::Allowed), false));
+        assert_eq!(in_flight.len(), 1, "the old query's cleanup leaves the newer entry");
+
+        let joins_after_cleanup = spawn_request(&in_flight, allowed());
+        settle().await;
+        new_release
+            .send(Ok(denied()))
+            .expect("newer query waiting");
+
+        assert_eq!(newer.await.expect("newer"), (Ok(denied()), false));
+        assert_eq!(joins_newer.await.expect("joins newer"), (Ok(denied()), true));
+        assert_eq!(joins_after_cleanup.await.expect("joins after cleanup"), (Ok(denied()), true));
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+        assert_eq!(in_flight.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_full_map_still_replaces_an_entry_past_the_join_age() {
+        let in_flight = Arc::new(InFlightQueries::new(1, MAX_QUERY_TIME, Duration::ZERO));
+        let sends = Arc::new(AtomicUsize::new(0));
+        let (old_release, old_gate) = oneshot::channel();
+        let (new_release, new_gate) = oneshot::channel();
+
+        let old = spawn_request(&in_flight, gated_query(&sends, old_gate));
+        settle().await;
+        let newer = spawn_request(&in_flight, gated_query(&sends, new_gate));
+        settle().await;
+        assert_eq!(in_flight.len(), 1);
+
+        new_release
+            .send(Ok(denied()))
+            .expect("newer query waiting");
+        assert_eq!(newer.await.expect("newer"), (Ok(denied()), false));
+        assert_eq!(in_flight.len(), 0);
+        old_release
+            .send(Ok(TrqpOutcome::Allowed))
+            .expect("old query waiting");
+        assert_eq!(old.await.expect("old"), (Ok(TrqpOutcome::Allowed), false));
+        assert_eq!(sends.load(Ordering::SeqCst), 2);
+        assert_eq!(in_flight.len(), 0);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_query_past_the_time_limit_fails_every_waiter_and_frees_its_entry() {
-        let in_flight = InFlightQueries::new(MAX_IN_FLIGHT, Duration::from_secs(5));
+        let in_flight = InFlightQueries::new(MAX_IN_FLIGHT, Duration::from_secs(5), MAX_JOIN_AGE);
         let joined = [AtomicBool::new(false), AtomicBool::new(false)];
 
         let (first, second) = tokio::join!(
