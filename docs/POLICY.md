@@ -123,6 +123,19 @@ every plane's global assignments (`global_policies/global.json`). `GET
 Discovery paths bypass the caller-leg check. See the source for error codes and
 template syntax.
 
+Requests that would send byte-for-byte the same TRQP query (same registry, query type,
+authority, entity, action and resource) while one is already waiting for its answer share that
+query instead of sending their own, provided that query was sent less than 2 seconds earlier.
+A request that finds only an older one sends its own query, and later identical requests share
+that newer query; requests already waiting on the older one still get its answer. A request
+to a registry marked Failed is refused before it can share a query, as a send to it would be.
+Up to 1,024 distinct queries are shared at once; past that, a request whose query is not
+already shared sends its own. The shared query runs on its own, so a request that is
+cancelled does not cancel it for the others; an error or timeout fails each waiting request as
+if it had sent the query, and a shared query still unanswered after 30 seconds fails for all of
+them. Nothing is kept once the answer is delivered: a later request always
+sends a new query.
+
 ![Trust Check flow: inbound request, extract metadata, TRQP query, trust registry, then OPA policy decides](assets/diagrams/trust-check-flow.png)
 
 Each leg carries a `trust_check_list`:
@@ -249,7 +262,8 @@ addressable from policy while `name` is only a label. Counts are code points, no
 When an audit sink selects `trust_check`, each element's outcome is recorded with the
 surface id, the request's trace id and the authenticated caller (on the Access Point, Fabric
 and MCP-proxy paths), so a trust check can be tied to the request and principal that
-triggered it. On the outbound path the record also names the Transit Point.
+triggered it. On the outbound path the record also names the Transit Point. A request that
+shared another request's query carries `joined_in_flight: true`; the field is omitted otherwise.
 
 ## Failed caller authentication
 

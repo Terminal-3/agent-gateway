@@ -491,6 +491,10 @@ pub enum DelegationAuditAction {
         action: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<String>,
+        /// The check awaited an identical TRQP query another request had in
+        /// flight; omitted when it sent its own.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        joined_in_flight: bool,
     },
     /// Trace terminated at this surface's egress. Records the own → downstream
     /// trace mapping so an operator can bridge the terminated trace from this
@@ -1763,6 +1767,7 @@ pub fn audit_trust_check(
     error_code: Option<&str>,
     action: Option<&str>,
     resource: Option<&str>,
+    joined_in_flight: bool,
 ) {
     emit("trust_check", || DelegationAuditEvent {
         event_id: new_event_id(),
@@ -1776,6 +1781,7 @@ pub fn audit_trust_check(
             transit_point: transit_point.map(str::to_string),
             action: action.map(str::to_string),
             resource: resource.map(str::to_string),
+            joined_in_flight,
         },
         agent_did: None,
         agent_identity_did: None,
@@ -2221,6 +2227,7 @@ mod tests {
                 ok: false,
                 error_code: Some("QUERY_TIMEOUT".to_string()),
                 transit_point: None,
+                joined_in_flight: false,
             }
             .is_vp_audit()
         );
@@ -2943,6 +2950,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             );
         })
         .await;
@@ -2970,6 +2978,7 @@ mod tests {
                 Some("AGENT_CARD_UNAVAILABLE"),
                 None,
                 None,
+                false,
             );
         })
         .await;
@@ -2997,6 +3006,7 @@ mod tests {
             ok: true,
             error_code: None,
             transit_point: None,
+            joined_in_flight: false,
         };
         let wire = serde_json::to_value(&action).expect("serialize action");
         assert_eq!(wire["trust_check"]["leg"], serde_json::json!("caller"));

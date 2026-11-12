@@ -170,6 +170,7 @@ mod tests {
             _registry_id: &str,
             _query_type: TrqpQueryType,
             _params: &TrqpQueryParams,
+            _joined: &std::sync::atomic::AtomicBool,
         ) -> Result<TrqpOutcome, TrqpClientError> {
             Ok(TrqpOutcome::Allowed)
         }
@@ -274,6 +275,7 @@ mod tests {
                 registry_id: &str,
                 _q: TrqpQueryType,
                 _p: &TrqpQueryParams,
+                _joined: &std::sync::atomic::AtomicBool,
             ) -> Result<TrqpOutcome, TrqpClientError> {
                 if registry_id == "tr-allow" {
                     Ok(TrqpOutcome::Allowed)
@@ -386,6 +388,7 @@ mod tests {
                 _registry_id: &str,
                 _q: TrqpQueryType,
                 params: &TrqpQueryParams,
+                _joined: &std::sync::atomic::AtomicBool,
             ) -> Result<TrqpOutcome, TrqpClientError> {
                 *self.captured.lock().await = Some(params.clone());
                 Ok(TrqpOutcome::Allowed)
@@ -537,6 +540,7 @@ mod tests {
                 _registry_id: &str,
                 _q: TrqpQueryType,
                 params: &TrqpQueryParams,
+                _joined: &std::sync::atomic::AtomicBool,
             ) -> Result<TrqpOutcome, TrqpClientError> {
                 *self.captured.lock().await = Some(params.clone());
                 Ok(TrqpOutcome::Allowed)

@@ -9,6 +9,7 @@
 //! Prometheus sample is emitted per element from inside [`execute_list`] —
 //! the call site does not need to instrument anything.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -178,11 +179,16 @@ pub enum TrqpClientError {
 /// one contract.
 #[async_trait]
 pub trait TrqpClient: Send + Sync {
+    /// Answers one query. A client may await an identical query already in
+    /// flight instead of sending its own, and sets `joined` when it does. The
+    /// flag is an out-parameter so it outlives a query the caller abandons at
+    /// its time limit.
     async fn query(
         &self,
         registry_id: &str,
         query_type: TrqpQueryType,
         params: &TrqpQueryParams,
+        joined: &AtomicBool,
     ) -> Result<TrqpOutcome, TrqpClientError>;
 }
 
@@ -231,6 +237,7 @@ async fn execute_one<C: TrqpClient + ?Sized>(
                 leg,
                 element_id: &elem.id,
                 element_name: elem.name.as_deref(),
+                joined_in_flight: false,
                 authority_id: Some(&elem.query.authority_id),
                 entity_id: Some(&elem.query.entity_id),
                 action: Some(&result.action),
@@ -247,16 +254,13 @@ async fn execute_one<C: TrqpClient + ?Sized>(
     };
 
     let started = Instant::now();
+    let joined = AtomicBool::new(false);
+    let query = client.query(&elem.trust_registry_id, elem.query_type, &resolved, &joined);
     let outcome = match elem.timeout_secs {
-        Some(secs) => {
-            let budget = Duration::from_secs(secs as u64);
-            timeout(budget, client.query(&elem.trust_registry_id, elem.query_type, &resolved))
-                .await
-                .map_err(|_| secs)
-        }
-        None => Ok(client
-            .query(&elem.trust_registry_id, elem.query_type, &resolved)
-            .await),
+        Some(secs) => timeout(Duration::from_secs(secs as u64), query)
+            .await
+            .map_err(|_| secs),
+        None => Ok(query.await),
     };
     let latency_ms = started
         .elapsed()
@@ -316,6 +320,7 @@ async fn execute_one<C: TrqpClient + ?Sized>(
         leg,
         element_id: &elem.id,
         element_name: elem.name.as_deref(),
+        joined_in_flight: joined.load(Ordering::Relaxed),
         authority_id: Some(&resolved.authority_id),
         entity_id: Some(&resolved.entity_id),
         action: Some(&result.action),
@@ -432,6 +437,7 @@ pub fn synthesize_unavailable_target<'o>(
                 leg: TrustCheckLeg::Target,
                 element_id: &elem.id,
                 element_name: elem.name.as_deref(),
+                joined_in_flight: false,
                 authority_id: None,
                 entity_id: None,
                 action: Some(&result.action),
@@ -582,6 +588,7 @@ mod tests {
             registry_id: &str,
             _query_type: TrqpQueryType,
             _params: &TrqpQueryParams,
+            _joined: &AtomicBool,
         ) -> Result<TrqpOutcome, TrqpClientError> {
             let idx = self
                 .dispatched
@@ -1014,6 +1021,80 @@ mod tests {
         assert_eq!(transit_point(&routed), Some("partner-a".to_string()));
         assert_eq!(unrouted.len(), 1);
         assert_eq!(transit_point(&unrouted), None);
+    }
+
+    struct JoiningClient {
+        joins: bool,
+    }
+
+    #[async_trait]
+    impl TrqpClient for JoiningClient {
+        async fn query(
+            &self,
+            _registry_id: &str,
+            _query_type: TrqpQueryType,
+            _params: &TrqpQueryParams,
+            joined: &AtomicBool,
+        ) -> Result<TrqpOutcome, TrqpClientError> {
+            joined.store(self.joins, Ordering::Relaxed);
+            Err(TrqpClientError::Unreachable("no connection".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn each_request_records_whether_it_joined_an_in_flight_query() {
+        let elements = [elem_with_action_resource("e1", "tr-a")];
+        let input = ctx();
+        let joined_in_flight = |events: &[crate::delegation_vault::audit::DelegationAuditEvent]| {
+            assert_eq!(events.len(), 1);
+            let wire = serde_json::to_value(&events[0]).expect("serialize record");
+            match &events[0].event {
+                crate::delegation_vault::audit::DelegationAuditAction::TrustCheck {
+                    joined_in_flight,
+                    ok,
+                    error_code,
+                    ..
+                } => {
+                    assert!(!ok);
+                    assert_eq!(error_code.as_deref(), Some(TRUST_REGISTRY_UNREACHABLE));
+                    (*joined_in_flight, wire["event"]["trust_check"].get("joined_in_flight").cloned())
+                }
+                other => panic!("expected a trust check, got {other:?}"),
+            }
+        };
+
+        let (results, joined) = crate::audit::producer::capture(async {
+            execute_list(
+                "surf",
+                TrustCheckLeg::Caller,
+                &elements,
+                &ExecutionContext { input: &input },
+                &JoiningClient { joins: true },
+            )
+            .await
+        })
+        .await;
+        assert_eq!(
+            results[0]
+                .error
+                .as_ref()
+                .map(|e| e.code.as_str()),
+            Some(TRUST_REGISTRY_UNREACHABLE)
+        );
+        assert_eq!(joined_in_flight(&joined), (true, Some(json!(true))));
+
+        let (_, sent) = crate::audit::producer::capture(async {
+            execute_list(
+                "surf",
+                TrustCheckLeg::Caller,
+                &elements,
+                &ExecutionContext { input: &input },
+                &JoiningClient { joins: false },
+            )
+            .await
+        })
+        .await;
+        assert_eq!(joined_in_flight(&sent), (false, None));
     }
 
     #[tokio::test]
