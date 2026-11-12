@@ -566,16 +566,17 @@ TOCTOU on the remaining validate-then-connect fetch sinks.
   uses the same client and the same rules.
 - `egress::pinned_forward_client` also pins the served **agent-card fetch** from
   an `http(s)` surface target (`src/proxy/handler/agent_card.rs`), with or
-  without `target.auth`. A 3xx answers `502` "Upstream redirected"; a blocked
-  target answers `403` "Request blocked by egress policy". With `target.auth`
-  it shares the `pinned_target_client` helper with the inbound forward step.
+  without `target.auth`, through the `pinned_target_client` helper it shares
+  with the inbound forward step. A 3xx answers `502` "Upstream redirected". A
+  target that fails vetting, whether its address is blocked or its host does
+  not resolve, answers `403` "Request blocked by egress policy" and is recorded
+  as a refused request, as on the forward.
 - The [agent card preview](PROTOCOLS.md#agent-card-preview) builds the same card
   but always fetches an `http(s)` Target over `egress::pinned_forward_client`, with
   or without `target.auth`, and records nothing; a blocked target reports
   `blocked_by_egress` (`403`), and a host that does not resolve reports `unreachable`
-  (`502`). The served card route reports such a host as unreachable only when it fetches
-  without `target.auth`; a served fetch with `target.auth` (`pinned_target_client`) and the
-  proxy forward still answer `403` "Request blocked by egress policy" for it.
+  (`502`), which tells the operator the two apart. The served card route and the proxy
+  forward (`pinned_target_client`) answer `403` "Request blocked by egress policy" for both.
 - Fabric receive's **agent-card hop** to the local Target, made for the GW2
   policy context, uses the forward's `forward_client_for`
   (`egress::pinned_forward_client` for an `http(s)` Target), so it is pinned

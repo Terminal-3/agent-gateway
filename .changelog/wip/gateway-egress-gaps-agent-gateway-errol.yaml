@@ -26,6 +26,7 @@ changes:
       title: Fetch a served agent card without target auth from the vetted address
       description: >-
         The served agent card is fetched through a client pinned to the Target's vetted
-        address whether or not it carries `target.auth`. A blocked Target answers `403`
-        "Request blocked by egress policy". A host that does not resolve answers `502`
-        without `target.auth` and `403` with it.
+        address whether or not it carries `target.auth`. A Target that fails vetting,
+        whether its address is blocked or its host does not resolve, answers `403`
+        "Request blocked by egress policy" and is recorded as a refused request, as on the
+        forward. Without `target.auth`, a host that does not resolve answered `502` before.
