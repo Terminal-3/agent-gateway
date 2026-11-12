@@ -141,7 +141,7 @@ pub struct DelegationAuditEvent {
     /// Target endpoint the channel proxies to
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_endpoint: Option<String>,
-    /// Protocol of the channel (a2a, mcp, etc.)
+    /// Protocol of the surface or Transit Point (a2a, ap2, mcp, didcomm, http)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     /// OAuth scopes involved
@@ -159,7 +159,9 @@ pub struct DelegationAuditEvent {
     /// Caller identity context
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller: Option<AuditCallerContext>,
-    /// MCP tool name (if this was an MCP tool call)
+    /// The tool the record is about: the MCP tool of a `tools/call`, or, on a
+    /// policy decision for an A2A or AP2 request, its JSON-RPC method (see
+    /// [`crate::surface_context::called_tool`])
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_tool_name: Option<String>,
     /// VP JWT injected into the upstream response (if identity VP was sent)
@@ -1617,6 +1619,7 @@ pub fn audit_policy_decision(
     policy_content_hash: Option<&str>,
     caller: Option<AuditCallerContext>,
     removed_tools: Option<&[String]>,
+    protocol: Option<&str>,
     mcp_tool_name: Option<&str>,
     target_did: Option<&str>,
     target_claim: Option<(&str, &str)>,
@@ -1657,7 +1660,7 @@ pub fn audit_policy_decision(
         surface_id: surface_id.map(str::to_string),
         channel_name: surface_name.map(str::to_string),
         target_endpoint: None,
-        protocol: None,
+        protocol: protocol.map(str::to_string),
         scopes: None,
         token_id: None,
         inject_as: None,
@@ -2605,6 +2608,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
             };
             decide(Some(build_caller_context(&identity)));
@@ -2628,6 +2632,51 @@ mod tests {
         assert_eq!(row["event"]["policy_decision"]["policy_name"], "Deny unknown callers");
         assert_eq!(row["event"]["policy_decision"]["policy_version"], 3);
         assert_eq!(row["event"]["policy_decision"]["policy_content_hash"], "sha256:abc");
+    }
+
+    #[tokio::test]
+    async fn audit_policy_decision_records_the_protocol_and_the_tool() {
+        let decide = |protocol, tool| {
+            audit_policy_decision(
+                "surface",
+                "allow",
+                "surface.policy",
+                None,
+                None,
+                None,
+                Some("surface-1"),
+                None,
+                None,
+                Some("POST"),
+                Some("/a2a"),
+                Some("trace-1"),
+                "access_point",
+                None,
+                None,
+                None,
+                None,
+                protocol,
+                tool,
+                None,
+                None,
+            )
+        };
+        let ((), events) = crate::audit::producer::capture(async {
+            decide(Some("ap2"), Some("message/send"));
+            decide(None, None);
+        })
+        .await;
+
+        assert_eq!(events.len(), 2);
+        let row = serde_json::to_value(&events[0]).unwrap();
+        assert_eq!(row["protocol"], "ap2");
+        assert_eq!(row["mcp_tool_name"], "message/send");
+        let again: DelegationAuditEvent = serde_json::from_value(row).expect("deserialize record");
+        assert_eq!(again.protocol.as_deref(), Some("ap2"));
+        let row = serde_json::to_value(&events[1]).unwrap();
+        for field in ["protocol", "mcp_tool_name"] {
+            assert!(row.get(field).is_none(), "{field}: {row}");
+        }
     }
 
     fn transit_claims(

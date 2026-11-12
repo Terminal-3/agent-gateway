@@ -801,7 +801,7 @@ Every OPA evaluation emits a structured `tracing` event via
 `DEBUG`. Fields: `policy_scope`, `policy_flow`, `policy_decision`, `policy_id`,
 `policy_definition_id`, `deny_reason`, `surface_id`, `gateway_did`, `actor_did`,
 `caller_*`, `http_method`, `http_path`, `trace_id`, `policy_version`,
-`policy_content_hash`. See `src/observability/policy_audit.rs`.
+`policy_content_hash`, `protocol`, `mcp_tool_name`. See `src/observability/policy_audit.rs`.
 
 `policy_decision` is `allow`, `deny`, or `error`. `error` means the policy could not decide
 and the request was denied (fail closed); `deny_reason` is then `evaluation_error` (the Rego
@@ -833,6 +833,20 @@ Every decision record names its surface and its policy:
   label for the layer that decided: `Gateway policy`, `Surface policy`, `MCP tool gating`,
   `MCP tool policy`, `Response policy` or `MCP tool list filter`. A tool policy that matched no
   definition keeps the tool name.
+- `protocol` (top level) is the configured protocol of the surface or Transit Point serving the
+  request: `a2a`, `ap2`, `mcp` or `didcomm` for a surface (on the access point and Fabric flows),
+  `a2a`, `ap2`, `mcp` or `http` for a Transit Point.
+- `mcp_tool_name` (top level) names the tool the request calls: the tool of an MCP `tools/call`,
+  or the JSON-RPC method of an A2A or AP2 request. A method the gateway recognises in either A2A
+  era is recorded in its v0.3 slash form, the same form as `input.a2a.method_canonical`, so v1.0
+  `SendMessage` and v0.3 `message/send` are both `message/send`; any other method is recorded as
+  the caller sent it. Every decision on the request carries it, response decisions included,
+  except `mcp_tool_list` decisions. It is absent when the request names no tool: an MCP
+  `initialize`, `tools/list` or notification, a `tools/call` without a readable tool name, a
+  request without a top-level JSON-RPC `method` (such as a batch), or any request to an `http`
+  Transit Point. A tool name or method longer than 128 bytes, including a tool a decision names
+  itself, is cut to 128 bytes at a UTF-8 character boundary.
+- A decision recorded before the gateway has read the request has neither field.
 - `request_id` identifies the gateway request the decision belongs to; one request yields a
   decision per policy layer, all with the same `request_id` (see
   [`OBSERVABILITY.md`](OBSERVABILITY.md)).

@@ -2748,16 +2748,35 @@ fn strip_overrides_keys(overrides: &mut serde_json::Map<String, serde_json::Valu
 
 // ─── Display ────────────────────────────────────────────────────────────────
 
+impl SurfaceProtocol {
+    /// The protocol's serialised name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::A2a => "a2a",
+            Self::Ap2 => "ap2",
+            Self::Mcp => "mcp",
+            Self::DIDComm => "didcomm",
+        }
+    }
+}
+
 impl std::fmt::Display for SurfaceProtocol {
     fn fmt(
         &self,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TransitProtocol {
+    /// The protocol's serialised name.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::A2a => write!(f, "a2a"),
-            Self::Ap2 => write!(f, "ap2"),
-            Self::Mcp => write!(f, "mcp"),
-            Self::DIDComm => write!(f, "didcomm"),
+            Self::A2a => "a2a",
+            Self::Ap2 => "ap2",
+            Self::Mcp => "mcp",
+            Self::Http => "http",
         }
     }
 }
@@ -2767,12 +2786,7 @@ impl std::fmt::Display for TransitProtocol {
         &self,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        match self {
-            Self::A2a => write!(f, "a2a"),
-            Self::Ap2 => write!(f, "ap2"),
-            Self::Mcp => write!(f, "mcp"),
-            Self::Http => write!(f, "http"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -3802,6 +3816,19 @@ impl AgentSurface {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn protocol_names_are_their_serialised_form() {
+        use super::{SurfaceProtocol, TransitProtocol};
+        for protocol in [SurfaceProtocol::A2a, SurfaceProtocol::Ap2, SurfaceProtocol::Mcp, SurfaceProtocol::DIDComm] {
+            assert_eq!(serde_json::to_value(&protocol).unwrap(), protocol.as_str());
+            assert_eq!(protocol.to_string(), protocol.as_str());
+        }
+        for protocol in [TransitProtocol::A2a, TransitProtocol::Ap2, TransitProtocol::Mcp, TransitProtocol::Http] {
+            assert_eq!(serde_json::to_value(&protocol).unwrap(), protocol.as_str());
+            assert_eq!(protocol.to_string(), protocol.as_str());
+        }
+    }
+
     #[test]
     fn mcp_http_settings_are_independent_and_reject_non_mcp_protocols() {
         let mut stored = serde_json::json!({

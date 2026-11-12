@@ -1395,3 +1395,46 @@ async fn a_fabric_request_is_refused_when_its_transit_token_cannot_be_issued() {
         )]
     );
 }
+
+/// A decision the receiver records on a request a peer sends names the
+/// surface's protocol and the method the peer's caller sent: a recognised
+/// method in its canonical slash form, any other cut to 128 bytes.
+#[tokio::test]
+async fn a_fabric_decision_names_the_surface_protocol_and_the_called_method() {
+    if ran_in_child("ATG_FABRIC_DECISION_CALL_CHILD").await {
+        return;
+    }
+    let target = RecordingTarget::start(axum::http::StatusCode::OK, &[]).await;
+    let root = tempfile::tempdir().unwrap();
+    let mut gated = serde_json::to_value(surface("ap2", &target.url, &[])).unwrap();
+    gated["target"]["policy"] = json!({ "policy_definition_id": "not-compiled" });
+    let _receiver = receiver(root.path(), &serde_json::from_value(gated).unwrap()).await;
+
+    let long_method = format!("vendor/{}", "m".repeat(600));
+    let cases = [
+        ("message/send", "message/send"),
+        ("SendMessage", "message/send"),
+        (long_method.as_str(), &long_method[..128]),
+    ];
+    for (method, recorded) in cases {
+        let mut body = a2a_body();
+        body["method"] = json!(method);
+        let (response, events) = crate::audit::producer::capture(forward_response(&forward_request(
+            root.path(),
+            json!({ "content-type": "application/json", "x-api-key": CALLER_KEY }),
+            body,
+        )))
+        .await;
+
+        assert_eq!(response["status"], 403, "{method}: {response}");
+        let decisions: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(&event.event, DelegationAuditAction::PolicyDecision { flow, .. } if flow == "fabric"))
+            .collect();
+        assert!(!decisions.is_empty(), "{method}: {events:?}");
+        for decision in decisions {
+            assert_eq!(decision.protocol.as_deref(), Some("ap2"), "{decision:?}");
+            assert_eq!(decision.mcp_tool_name.as_deref(), Some(recorded), "{decision:?}");
+        }
+    }
+}

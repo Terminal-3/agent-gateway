@@ -484,6 +484,22 @@ impl A2aContext {
     }
 }
 
+/// The tool a request names on its policy decision records: the tool of an
+/// MCP `tools/call`, else the JSON-RPC method of an A2A or AP2 request,
+/// `a2a_method`, in its canonical v0.3 slash form when the method is
+/// recognised in either era and as the caller sent it otherwise. Any other MCP
+/// request, such as `initialize`, `tools/list` or a notification, names no
+/// tool.
+pub fn called_tool<'a>(
+    mcp: Option<&'a McpContext>,
+    a2a_method: Option<&'a str>,
+) -> Option<&'a str> {
+    match mcp {
+        Some(mcp) => mcp.called_tool_name(),
+        None => a2a_method.map(crate::a2a::canonical_method),
+    }
+}
+
 fn is_false(v: &bool) -> bool {
     !*v
 }
@@ -954,6 +970,36 @@ mod tests {
             .called_tool_name(),
             None
         );
+    }
+
+    #[test]
+    fn called_tool_is_the_mcp_tool_or_the_canonical_a2a_method() {
+        let mcp = |method: &str| McpContext {
+            method: method.to_string(),
+            tool_name: Some("search".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(called_tool(Some(&mcp("tools/call")), None), Some("search"));
+        for setup in ["initialize", "tools/list", "notifications/initialized"] {
+            assert_eq!(called_tool(Some(&mcp(setup)), None), None, "{setup}");
+            assert_eq!(called_tool(Some(&mcp(setup)), Some("tools/call")), None, "{setup}");
+        }
+        let unnamed = McpContext {
+            method: "tools/call".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(called_tool(Some(&unnamed), None), None);
+
+        for (method, canonical) in [
+            ("SendMessage", "message/send"),
+            ("message/send", "message/send"),
+            ("GetTask", "tasks/get"),
+            ("tasks/get", "tasks/get"),
+            ("vendor/custom", "vendor/custom"),
+        ] {
+            assert_eq!(called_tool(None, Some(method)), Some(canonical), "{method}");
+        }
+        assert_eq!(called_tool(None, None), None);
     }
 
     #[test]
