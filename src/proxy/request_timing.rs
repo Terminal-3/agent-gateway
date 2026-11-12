@@ -35,6 +35,7 @@ pub(crate) struct RequestTiming {
     target: Option<String>,
     pin: Option<PinStepTiming>,
     before_classify: Option<Duration>,
+    identity_started: Option<Instant>,
     identity: Option<Duration>,
     trust_check: Option<(Duration, usize)>,
     vp_mint: Option<Duration>,
@@ -57,6 +58,7 @@ impl RequestTiming {
             target: None,
             pin: None,
             before_classify: None,
+            identity_started: None,
             identity: None,
             trust_check: None,
             vp_mint: None,
@@ -107,11 +109,17 @@ impl RequestTiming {
         self.before_classify = Some(self.started.elapsed());
     }
 
-    pub(crate) fn identity(
-        &mut self,
-        elapsed: Duration,
-    ) {
-        self.identity = Some(elapsed);
+    /// Starts the identity stage. A stage that is started and not finished,
+    /// because the request ended inside it, is logged up to the end of the
+    /// request.
+    pub(crate) fn identity_started(&mut self) {
+        self.identity_started = Some(Instant::now());
+    }
+
+    pub(crate) fn identity_finished(&mut self) {
+        self.identity = self
+            .identity_started
+            .map(|started| started.elapsed());
     }
 
     pub(crate) fn trust_check(
@@ -154,7 +162,13 @@ impl Drop for RequestTiming {
             pin_queue_ms = pin.and_then(|p| p.queued).map(ms),
             pin_resolve_ms = pin.and_then(|p| p.steps.resolve).map(ms),
             pin_build_ms = pin.and_then(|p| p.steps.build).map(ms),
-            identity_ms = self.identity.map(ms),
+            identity_ms = self
+                .identity
+                .or_else(|| {
+                    self.identity_started
+                        .map(|started| started.elapsed())
+                })
+                .map(ms),
             trust_check_ms = self.trust_check.map(|(elapsed, _)| ms(elapsed)),
             trust_checks = self.trust_check.map(|(_, checks)| checks as u64),
             vp_mint_ms = self.vp_mint.map(ms),
@@ -193,8 +207,11 @@ mod tests {
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::{Context, SubscriberExt};
 
+    /// The `(name, value)` pairs of one captured event.
+    type Event = Vec<(String, String)>;
+
     #[derive(Default)]
-    struct Fields(Vec<(String, String)>);
+    struct Fields(Event);
 
     impl Visit for Fields {
         fn record_debug(
@@ -207,7 +224,7 @@ mod tests {
         }
     }
 
-    struct Capture(Arc<Mutex<Vec<Vec<(String, String)>>>>);
+    struct Capture(Arc<Mutex<Vec<Event>>>);
 
     impl<S: tracing::Subscriber> Layer<S> for Capture {
         fn on_event(
@@ -224,15 +241,14 @@ mod tests {
         }
     }
 
-    fn capture(f: impl FnOnce()) -> Vec<Vec<(String, String)>> {
+    fn capture(f: impl FnOnce()) -> Vec<Event> {
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(Capture(events.clone()));
         tracing::subscriber::with_default(subscriber, f);
-        let events = events
+        events
             .lock()
             .expect("capture lock")
-            .clone();
-        events
+            .clone()
     }
 
     fn field<'a>(
@@ -262,7 +278,8 @@ mod tests {
                 },
             );
             timing.classified();
-            timing.identity(Duration::from_millis(14));
+            timing.identity_started();
+            timing.identity_finished();
             timing.trust_check(Duration::from_millis(312), 1);
             timing.vp_mint(Duration::from_micros(3_460));
             timing.upstream(Duration::from_millis(18));
@@ -279,7 +296,7 @@ mod tests {
         assert_eq!(field(event, "pin_queue_ms"), Some("0.2"));
         assert_eq!(field(event, "pin_resolve_ms"), Some("101.0"));
         assert_eq!(field(event, "pin_build_ms"), Some("3.0"));
-        assert_eq!(field(event, "identity_ms"), Some("14.0"));
+        assert!(field(event, "identity_ms").is_some());
         assert_eq!(field(event, "trust_check_ms"), Some("312.0"));
         assert_eq!(field(event, "trust_checks"), Some("1"));
         assert_eq!(field(event, "vp_mint_ms"), Some("3.5"));
@@ -316,6 +333,14 @@ mod tests {
         ] {
             assert_eq!(field(event, absent), None, "{absent} in {event:?}");
         }
+    }
+
+    #[test]
+    fn logs_a_stage_the_request_ended_in() {
+        let events = capture(|| {
+            RequestTiming::new(true, Instant::now(), "surface-1", "bank").identity_started();
+        });
+        assert!(field(&events[0], "identity_ms").is_some(), "{:?}", events[0]);
     }
 
     #[test]

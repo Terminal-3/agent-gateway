@@ -4206,6 +4206,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
                 payment_context.as_ref(),
                 &trace_id,
+                &mut request_timing,
             )
             .await
             {
@@ -4265,6 +4266,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
                 payment_context.as_ref(),
                 &trace_id,
+                &mut request_timing,
             )
             .await
             {
@@ -4383,6 +4385,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
                 payment_context.as_ref(),
                 &trace_id,
+                &mut request_timing,
             )
             .await
             {
@@ -4493,6 +4496,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
                 payment_context.as_ref(),
                 &trace_id,
+                &mut request_timing,
             )
             .await
             {
@@ -4770,7 +4774,7 @@ async fn proxy_handler_with_mcp_runtime(
     // Use MPP receipt if available, otherwise None
     let payment_response_header: Option<String> = mpp_receipt_header;
     let mut modern_local_receipt = None;
-    let identity_started = std::time::Instant::now();
+    request_timing.identity_started();
 
     // Inspect extensions if enabled and this is a POST with JSON body (A2A or MCP protocol)
     // Also capture if client supports credential extension for response VP injection
@@ -5326,7 +5330,7 @@ async fn proxy_handler_with_mcp_runtime(
     #[allow(unused_mut)]
     let mut body_bytes = body_bytes;
 
-    request_timing.identity(identity_started.elapsed());
+    request_timing.identity_finished();
 
     // ── Trust Check stage (caller leg) ──────────────────────────────────────
     // Runs after the managed-identity resolver populates `extension_identity`
@@ -7631,7 +7635,7 @@ async fn proxy_handler_with_mcp_runtime(
     };
     let upstream_response = if let Some(response) = owned_modern_response {
         drop(send_response);
-        response
+        Ok(response)
     } else if modern_request.is_some() {
         let header_timeout = std::time::Duration::from_secs(
             state
@@ -7643,17 +7647,20 @@ async fn proxy_handler_with_mcp_runtime(
             .await
             .map_err(|_| {
                 create_error_response(StatusCode::GATEWAY_TIMEOUT, "Modern MCP upstream response headers timed out")
-            })??
+            })
+            .and_then(|sent| sent)
     } else if let Some(header_timeout) = a2a_stream_header_timeout {
         tokio::time::timeout(header_timeout, send_response)
             .await
             .map_err(|_| {
                 create_error_response(StatusCode::GATEWAY_TIMEOUT, "A2A upstream response headers timed out")
-            })??
+            })
+            .and_then(|sent| sent)
     } else {
-        send_response.await?
+        send_response.await
     };
     request_timing.upstream(request_latency_start.elapsed());
+    let upstream_response = upstream_response?;
     // The vendor's answer to the Target's grant: a refusal of the token gets
     // one refresh and one retry, and its cookies and authentication challenges
     // never reach the caller.
@@ -15082,6 +15089,7 @@ async fn evaluate_mcp_proxy_opa_policies(
     mcp_context: Option<&crate::surface_context::McpContext>,
     payment_context: Option<&crate::surface_context::PaymentContext>,
     trace_id: &str,
+    request_timing: &mut crate::proxy::request_timing::RequestTiming,
 ) -> Result<crate::surface_context::PolicyInput, Response> {
     /// Build a deny response for the MCP proxy OPA gate. For `tools/call`
     /// requests, returns a JSON-RPC error (HTTP 200); for everything else,
@@ -15160,6 +15168,7 @@ async fn evaluate_mcp_proxy_opa_policies(
                 .clone()
         {
             let client = crate::trust_registry_verification::TrqpListenerClient::new(manager);
+            let trust_check_started = std::time::Instant::now();
             policy_input.trust_check_results = crate::audit::context::with_caller(
                 authenticated_identity.map(crate::delegation_vault::audit::build_caller_context),
                 crate::trust_registry_verification::run_caller_trust_check(
@@ -15173,6 +15182,7 @@ async fn evaluate_mcp_proxy_opa_policies(
                 ),
             )
             .await;
+            request_timing.trust_check(trust_check_started.elapsed(), caller_elements.len());
         }
     }
 
@@ -22272,6 +22282,12 @@ allow if {
                 None,
                 None,
                 "trace-mcp-proxy",
+                &mut crate::proxy::request_timing::RequestTiming::new(
+                    false,
+                    std::time::Instant::now(),
+                    "surface-1",
+                    "mcp",
+                ),
             )
             .await
             .unwrap()

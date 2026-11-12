@@ -456,6 +456,7 @@ pub fn spawn_trust_recorder(
     tokio::spawn(async move {
         let queued = spawned.elapsed();
         let Some(store) = tr_manager.store().await else {
+            log_trust_recorder_timing(&surface_id, queued, None, spawned);
             return;
         };
         let resolved_issuer_did = resolve_surface_issuer_did(issuer_id.as_deref()).await;
@@ -480,15 +481,28 @@ pub fn spawn_trust_recorder(
         {
             warn!(surface_id = %surface_id, error = %e, "Trust Recorder: failed to store status");
         }
-        info!(
-            surface_id = %surface_id,
-            entries = entry_count as u64,
-            queue_ms = crate::proxy::request_timing::ms(queued),
-            apply_ms = crate::proxy::request_timing::ms(apply),
-            total_ms = crate::proxy::request_timing::ms(spawned.elapsed()),
-            "Trust Recorder timing"
-        );
+        log_trust_recorder_timing(&surface_id, queued, Some((apply, entry_count)), spawned);
     });
+}
+
+/// Writes the `Trust Recorder timing` line of one run. `applied` holds the
+/// apply duration and entry count, and is `None` when the registry store was
+/// unavailable and nothing was applied.
+fn log_trust_recorder_timing(
+    surface_id: &str,
+    queued: std::time::Duration,
+    applied: Option<(std::time::Duration, usize)>,
+    spawned: std::time::Instant,
+) {
+    use crate::proxy::request_timing::ms;
+    info!(
+        surface_id = %surface_id,
+        entries = applied.map(|(_, count)| count as u64),
+        queue_ms = ms(queued),
+        apply_ms = applied.map(|(apply, _)| ms(apply)),
+        total_ms = ms(spawned.elapsed()),
+        "Trust Recorder timing"
+    );
 }
 
 /// Look up `surface.issuer_id → Issuer.did` via the process-global
