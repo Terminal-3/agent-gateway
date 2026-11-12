@@ -207,6 +207,36 @@ The `xff` field keeps the client address that the reverse proxy reported. It is 
 many jurisdictions, so ship and retain the access log accordingly. [Log
 redaction](CONFIGURATION_REFERENCE.md#log-redaction) applies to these lines as well.
 
+## Request timing
+
+Every request to an MCP Access Point logs one `INFO` line, `MCP request timing`, when its handler
+finishes, whatever the outcome
+([`request_timing`](../src/proxy/request_timing.rs)). Durations are in milliseconds to a tenth,
+and a stage that did not run is left out.
+
+| Field | Meaning |
+| --- | --- |
+| `surface_id`, `channel` | The surface's id and name |
+| `mcp_method` | The JSON-RPC method, or `invalid` when it is longer than 64 characters or has characters outside letters, digits and `/ _ - . $` |
+| `target` | The Target's `host:port` |
+| `total_ms` | The whole handler |
+| `before_classify_ms` | From the start of the request until it is classified as MCP |
+| `pin_ms` | Waiting for the blocking task that resolves, vets and pins the Target and builds its client |
+| `pin_queue_ms` | From submitting that task until it starts on a blocking thread |
+| `pin_resolve_ms` | Resolving the Target's host with the OS resolver and vetting the addresses |
+| `pin_build_ms` | Building the pinned client, which loads the platform CA store |
+| `identity_ms` | Caller identity resolution and identity VP verification before the Trust Check |
+| `trust_check_ms`, `trust_checks` | The caller-leg Trust Check and the number of checks in its list |
+| `vp_mint_ms` | Minting the request-path identity VP |
+| `upstream_ms` | Sending to the Target until its response headers arrive |
+
+`pin_ms` minus the three `pin_*` steps is the time between the task finishing and the request
+handler running again. The line carries no headers, tokens, bodies, query strings or caller DIDs.
+
+The Trust Recorder logs `Trust Recorder timing` from its background task after each run, with
+`surface_id`, `entries`, `queue_ms` (from being spawned until it ran), `apply_ms` (writing the
+records) and `total_ms`.
+
 ## Access token rotation events
 
 `POST /api/v1/access-tokens/{id}/rotate` emits structured tracing events on the `audit` target.

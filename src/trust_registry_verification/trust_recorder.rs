@@ -452,12 +452,15 @@ pub fn spawn_trust_recorder(
     let surface_id = surface.surface_id.clone();
     let tenant_id = surface.tenant_id.clone();
     let started_at = chrono::Utc::now();
+    let spawned = std::time::Instant::now();
     tokio::spawn(async move {
+        let queued = spawned.elapsed();
         let Some(store) = tr_manager.store().await else {
             return;
         };
         let resolved_issuer_did = resolve_surface_issuer_did(issuer_id.as_deref()).await;
         let display_name = resolve_recorder_display_name(&did, &surface_id).await;
+        let apply_started = std::time::Instant::now();
         let entries = apply_trust_recorder(
             &cfg,
             &did,
@@ -468,6 +471,8 @@ pub fn spawn_trust_recorder(
             store,
         )
         .await;
+        let apply = apply_started.elapsed();
+        let entry_count = entries.len();
         if let Some(status_store) = global_store()
             && let Err(e) = status_store
                 .record(&surface_id, &did, entries, started_at, chrono::Utc::now())
@@ -475,6 +480,14 @@ pub fn spawn_trust_recorder(
         {
             warn!(surface_id = %surface_id, error = %e, "Trust Recorder: failed to store status");
         }
+        info!(
+            surface_id = %surface_id,
+            entries = entry_count as u64,
+            queue_ms = crate::proxy::request_timing::ms(queued),
+            apply_ms = crate::proxy::request_timing::ms(apply),
+            total_ms = crate::proxy::request_timing::ms(spawned.elapsed()),
+            "Trust Recorder timing"
+        );
     });
 }
 

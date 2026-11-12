@@ -1559,6 +1559,15 @@ async fn proxy_handler_with_mcp_runtime(
 
     // Start timing the request
     let start_time = std::time::Instant::now();
+    let mut request_timing = crate::proxy::request_timing::RequestTiming::new(
+        state
+            .surface
+            .channel_protocol()
+            == crate::config::ChannelProtocol::Mcp,
+        start_time,
+        config_id,
+        &channel_name,
+    );
 
     // Trace id for this request. A trusted internal forward (fabric G2G / Transit
     // Point) carries the originating request's id in `X-Gateway-Trace-Id`; reusing
@@ -2617,6 +2626,10 @@ async fn proxy_handler_with_mcp_runtime(
     } else {
         None
     };
+    match mcp_context.as_ref() {
+        Some(context) => request_timing.mcp_method(&context.method),
+        None => request_timing.mcp_method_from_body(&body_bytes),
+    }
 
     // Parse the A2A/AP2 message payload so policies can inspect the actual
     // agent content (`input.a2a`). Built after boundary Header Metadata
@@ -3967,7 +3980,9 @@ async fn proxy_handler_with_mcp_runtime(
         .as_ref()
         .map(|route| route.client().clone());
     if forward_client.is_none() && !is_a2a_proxy_target && !is_mcp_proxy_target {
-        match pinned_target_client(&state, &channel_name, &target_url, &audit_facts).await {
+        let (pinned, pin_timing) = pinned_target_client_timed(&state, &channel_name, &target_url, &audit_facts).await;
+        request_timing.pin(&target_url, pin_timing);
+        match pinned {
             Ok(client) => forward_client = Some(client),
             Err(blocked) => return Ok(blocked),
         }
@@ -4455,6 +4470,7 @@ async fn proxy_handler_with_mcp_runtime(
             return Ok(err_response);
         }
 
+        request_timing.classified();
         channel_info!(config_id, "Detected MCP request");
 
         // Check if this channel uses a proxy:// backend (MCP proxy)
@@ -4754,6 +4770,7 @@ async fn proxy_handler_with_mcp_runtime(
     // Use MPP receipt if available, otherwise None
     let payment_response_header: Option<String> = mpp_receipt_header;
     let mut modern_local_receipt = None;
+    let identity_started = std::time::Instant::now();
 
     // Inspect extensions if enabled and this is a POST with JSON body (A2A or MCP protocol)
     // Also capture if client supports credential extension for response VP injection
@@ -5309,6 +5326,8 @@ async fn proxy_handler_with_mcp_runtime(
     #[allow(unused_mut)]
     let mut body_bytes = body_bytes;
 
+    request_timing.identity(identity_started.elapsed());
+
     // ── Trust Check stage (caller leg) ──────────────────────────────────────
     // Runs after the managed-identity resolver populates `extension_identity`
     // and before the inbound/surface OPA gates read `trust_check_results`, so
@@ -5356,6 +5375,7 @@ async fn proxy_handler_with_mcp_runtime(
             probe_input.payment = payment_context.clone();
             probe_input.identity_binding = identity_binding.clone();
             probe_input.normalize_caller_did();
+            let trust_check_started = std::time::Instant::now();
             trust_check_results = crate::audit::context::with_caller(
                 authenticated_identity
                     .as_ref()
@@ -5371,6 +5391,7 @@ async fn proxy_handler_with_mcp_runtime(
                 ),
             )
             .await;
+            request_timing.trust_check(trust_check_started.elapsed(), caller_elements.len());
         }
     }
 
@@ -7050,10 +7071,12 @@ async fn proxy_handler_with_mcp_runtime(
             delegation_actions_for_vp.clone(),
             authenticated_identity.as_ref(),
         );
-        match vc_issuer
+        let vp_mint_started = std::time::Instant::now();
+        let minted = vc_issuer
             .create_agent_identity_presentation_with_binding(&result.did, &result.identity_fields, wb, None, None)
-            .await
-        {
+            .await;
+        request_timing.vp_mint(vp_mint_started.elapsed());
+        match minted {
             Ok(final_vp_jwt) => {
                 // 1. inject into outbound body (replaces the slot if any existed)
                 if (state
@@ -7630,6 +7653,7 @@ async fn proxy_handler_with_mcp_runtime(
     } else {
         send_response.await?
     };
+    request_timing.upstream(request_latency_start.elapsed());
     // The vendor's answer to the Target's grant: a refusal of the token gets
     // one refresh and one retry, and its cookies and authentication challenges
     // never reach the caller.
@@ -14835,6 +14859,19 @@ async fn pinned_target_client(
     target_url: &str,
     facts: &crate::audit::request_events::RequestFacts<'_>,
 ) -> Result<reqwest::Client, Response> {
+    pinned_target_client_timed(state, channel_name, target_url, facts)
+        .await
+        .0
+}
+
+/// [`pinned_target_client`] with the wait for its blocking task and the time
+/// each of its steps took.
+async fn pinned_target_client_timed(
+    state: &ProxyState,
+    channel_name: &str,
+    target_url: &str,
+    facts: &crate::audit::request_events::RequestFacts<'_>,
+) -> (Result<reqwest::Client, Response>, crate::proxy::request_timing::PinStepTiming) {
     let candidate = target_url.to_string();
     let timeout = std::time::Duration::from_secs(
         state
@@ -14842,7 +14879,23 @@ async fn pinned_target_client(
             .a2a
             .timeout_seconds,
     );
-    match tokio::task::spawn_blocking(move || crate::egress::pinned_forward_client(&candidate, timeout)).await {
+    let submitted = std::time::Instant::now();
+    let task = tokio::task::spawn_blocking(move || {
+        let queued = submitted.elapsed();
+        let (result, steps) = crate::egress::pinned_forward_client_timed(&candidate, timeout);
+        (result, queued, steps)
+    })
+    .await;
+    let mut pin_timing = crate::proxy::request_timing::PinStepTiming {
+        total: submitted.elapsed(),
+        ..Default::default()
+    };
+    let task = task.map(|(result, queued, steps)| {
+        pin_timing.queued = Some(queued);
+        pin_timing.steps = steps;
+        result
+    });
+    let pinned = match task {
         Ok(Ok((client, _target))) => Ok(client),
         Ok(Err(e)) => {
             warn!(channel = channel_name, target = %loggable::url(target_url), "SSRF blocked by egress policy: {}", e);
@@ -14864,7 +14917,8 @@ async fn pinned_target_client(
             );
             Err(create_error_response(StatusCode::FORBIDDEN, "Request blocked by egress policy"))
         }
-    }
+    };
+    (pinned, pin_timing)
 }
 
 /// Caller headers forwarded on an agent-card fetch that carries the target

@@ -20,7 +20,7 @@
 //! own exact allow-list.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{AUTHORIZATION, COOKIE, HeaderMap, LOCATION, PROXY_AUTHORIZATION};
 use reqwest::{Client, Method, Response};
@@ -321,10 +321,26 @@ fn pin_and_build(
     vetted_url: Url,
     blocked: impl Fn(IpAddr) -> bool,
     timeout: Duration,
+    timings: &mut PinTimings,
 ) -> Result<(Client, PinnedTarget), EgressError> {
-    let target = pin_url(vetted_url, blocked)?;
-    let client = pinned_client(&target, timeout)?;
-    Ok((client, target))
+    let started = Instant::now();
+    let target = pin_url(vetted_url, blocked);
+    timings.resolve = Some(started.elapsed());
+    let target = target?;
+    let started = Instant::now();
+    let client = pinned_client(&target, timeout);
+    timings.build = Some(started.elapsed());
+    Ok((client?, target))
+}
+
+/// Time spent in each step of [`pinned_forward_client_timed`]; a step that did
+/// not run is `None`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PinTimings {
+    /// Resolving the host with the OS resolver and vetting every address.
+    pub(crate) resolve: Option<Duration>,
+    /// Building the pinned client, which loads the platform CA store.
+    pub(crate) build: Option<Duration>,
 }
 
 /// Vet a proxy-forward target with the cloud-metadata-only policy and return a
@@ -344,8 +360,19 @@ pub(crate) fn pinned_forward_client(
     raw_url: &str,
     timeout: Duration,
 ) -> Result<(Client, PinnedTarget), EgressError> {
-    let url = validate_url_not_cloud_metadata_host(raw_url).map_err(EgressError::Blocked)?;
-    pin_and_build(url, is_cloud_metadata_resolved_ip, timeout)
+    pinned_forward_client_timed(raw_url, timeout).0
+}
+
+/// [`pinned_forward_client`] with the time its resolve and build steps took.
+pub(crate) fn pinned_forward_client_timed(
+    raw_url: &str,
+    timeout: Duration,
+) -> (Result<(Client, PinnedTarget), EgressError>, PinTimings) {
+    let mut timings = PinTimings::default();
+    let result = validate_url_not_cloud_metadata_host(raw_url)
+        .map_err(EgressError::Blocked)
+        .and_then(|url| pin_and_build(url, is_cloud_metadata_resolved_ip, timeout, &mut timings));
+    (result, timings)
 }
 
 /// Vet an attacker-influenceable target with the Strict policy and return a
@@ -364,7 +391,7 @@ pub(crate) fn pinned_strict_client(
     timeout: Duration,
 ) -> Result<(Client, PinnedTarget), EgressError> {
     let url = validate_resolved_url(raw_url).map_err(EgressError::Blocked)?;
-    pin_and_build(url, |ip| EgressPolicy::Strict.is_blocked_ip(ip), timeout)
+    pin_and_build(url, |ip| EgressPolicy::Strict.is_blocked_ip(ip), timeout, &mut PinTimings::default())
 }
 
 /// Vet and pin an authorization server's metadata URL, for a credential
@@ -1175,6 +1202,23 @@ mod tests {
     fn pinned_forward_client_reports_a_host_that_does_not_resolve_as_dns() {
         let result = pinned_forward_client("http://nonexistent.host.invalid/agent", Duration::from_secs(5));
         assert!(matches!(result, Err(EgressError::Dns(_))), "got {result:?}");
+    }
+
+    #[test]
+    fn pinned_forward_client_timed_times_the_steps_that_ran() {
+        let (result, timings) = pinned_forward_client_timed("http://127.0.0.1:9/ok", Duration::from_secs(5));
+        assert!(result.is_ok(), "got {result:?}");
+        assert!(timings.resolve.is_some() && timings.build.is_some(), "got {timings:?}");
+
+        let (result, timings) =
+            pinned_forward_client_timed("http://nonexistent.host.invalid/agent", Duration::from_secs(5));
+        assert!(matches!(result, Err(EgressError::Dns(_))), "got {result:?}");
+        assert!(timings.resolve.is_some() && timings.build.is_none(), "got {timings:?}");
+
+        let (result, timings) =
+            pinned_forward_client_timed("http://169.254.169.254/latest/meta-data/", Duration::from_secs(5));
+        assert!(matches!(result, Err(EgressError::Blocked(_))), "got {result:?}");
+        assert_eq!(timings, PinTimings::default());
     }
 
     #[tokio::test]
