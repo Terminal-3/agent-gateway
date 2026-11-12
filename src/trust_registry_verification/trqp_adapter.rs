@@ -111,16 +111,6 @@ impl TrqpClient for TrqpListenerClient {
         registry_id: &str,
         query_type: TrqpQueryType,
         params: &TrqpQueryParams,
-    ) -> Result<TrqpOutcome, TrqpClientError> {
-        self.query_shared(registry_id, query_type, params, &AtomicBool::new(false))
-            .await
-    }
-
-    async fn query_shared(
-        &self,
-        registry_id: &str,
-        query_type: TrqpQueryType,
-        params: &TrqpQueryParams,
         joined: &AtomicBool,
     ) -> Result<TrqpOutcome, TrqpClientError> {
         let registry_did = self
@@ -136,15 +126,17 @@ impl TrqpClient for TrqpListenerClient {
         let query = send_query(Arc::clone(&self.manager), registry_did, query_type, request);
         match key {
             Some(key) => {
-                // A request that joins a query never reaches the send path's
-                // check for a registry marked Failed.
-                self.manager
-                    .ensure_not_marked_failed(registry_id)
-                    .await
-                    .map_err(map_error)?;
+                // The send path refuses a registry marked Failed; a request
+                // that joins a query never reaches it.
+                let admit_join = async {
+                    self.manager
+                        .ensure_not_marked_failed(registry_id)
+                        .await
+                        .map_err(map_error)
+                };
                 self.manager
                     .trqp_in_flight()
-                    .run(key, query, joined)
+                    .run(key, query, admit_join, joined)
                     .await
             }
             None => query.await,

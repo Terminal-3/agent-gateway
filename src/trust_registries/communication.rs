@@ -1681,14 +1681,14 @@ impl TrustRegistryListenerManager {
             .ok_or_else(|| TrustRegistryError::NotFound(format!("trust registry '{}' not found", trust_registry_id)))
     }
 
-    /// Whether the stored record of `trust_registry_id` is Failed, so its live
-    /// connection must not be queried. Without a store, or without a record, it is not.
-    async fn is_marked_failed(
+    /// Refuses a query to `trust_registry_id` while its stored record is
+    /// Failed. Without a store, or without a record, the query is allowed.
+    pub(crate) async fn ensure_not_marked_failed(
         &self,
         trust_registry_id: &str,
-    ) -> Result<bool, TrustRegistryError> {
+    ) -> Result<(), TrustRegistryError> {
         let Some(store) = self.store().await else {
-            return Ok(false);
+            return Ok(());
         };
         let registry = store
             .get(trust_registry_id)
@@ -1699,19 +1699,7 @@ impl TrustRegistryListenerManager {
                     trust_registry_id, e
                 ))
             })?;
-        Ok(registry.is_some_and(|registry| registry.connection_status == TrustRegistryConnectionStatus::Failed))
-    }
-
-    /// Refuses a query to `trust_registry_id` while its stored record is
-    /// Failed, as a send to its live connection is refused.
-    pub(crate) async fn ensure_not_marked_failed(
-        &self,
-        trust_registry_id: &str,
-    ) -> Result<(), TrustRegistryError> {
-        if self
-            .is_marked_failed(trust_registry_id)
-            .await?
-        {
+        if registry.is_some_and(|registry| registry.connection_status == TrustRegistryConnectionStatus::Failed) {
             return Err(marked_failed(trust_registry_id));
         }
         Ok(())
@@ -2304,12 +2292,8 @@ impl TrustRegistryListenerManager {
             .find(|c| !c.is_temporary && c.serves(trust_registry_did))
             .cloned();
         if let Some(connection) = live {
-            if self
-                .is_marked_failed(&connection.trust_registry_id)
-                .await?
-            {
-                return Err(marked_failed(&connection.trust_registry_id));
-            }
+            self.ensure_not_marked_failed(&connection.trust_registry_id)
+                .await?;
             return Ok(connection);
         }
         let pending = match self
@@ -4219,7 +4203,7 @@ mod tests {
                         .unwrap_or_else(|_| Err(TrqpClientError::QueryFailed("released without an answer".to_string())))
                 };
                 mgr.trqp_in_flight()
-                    .run(key, query, &AtomicBool::new(false))
+                    .run(key, query, async { Ok(()) }, &AtomicBool::new(false))
                     .await
             }
         });
@@ -4233,7 +4217,7 @@ mod tests {
         );
         let joined = AtomicBool::new(false);
         let refused = TrqpListenerClient::new(Arc::clone(&mgr))
-            .query_shared(&registry.id, TrqpQueryType::Authorization, &params, &joined)
+            .query(&registry.id, TrqpQueryType::Authorization, &params, &joined)
             .await;
 
         assert!(

@@ -179,25 +179,17 @@ pub enum TrqpClientError {
 /// one contract.
 #[async_trait]
 pub trait TrqpClient: Send + Sync {
+    /// Answers one query. A client may await an identical query already in
+    /// flight instead of sending its own, and sets `joined` when it does. The
+    /// flag is an out-parameter so it outlives a query the caller abandons at
+    /// its time limit.
     async fn query(
         &self,
         registry_id: &str,
         query_type: TrqpQueryType,
         params: &TrqpQueryParams,
+        joined: &AtomicBool,
     ) -> Result<TrqpOutcome, TrqpClientError>;
-
-    /// [`Self::query`], but may await an identical query already in flight
-    /// instead of sending its own; sets `joined` when it does.
-    async fn query_shared(
-        &self,
-        registry_id: &str,
-        query_type: TrqpQueryType,
-        params: &TrqpQueryParams,
-        _joined: &AtomicBool,
-    ) -> Result<TrqpOutcome, TrqpClientError> {
-        self.query(registry_id, query_type, params)
-            .await
-    }
 }
 
 /// Per-request resolution context. Today it carries just the OPA-shaped
@@ -263,7 +255,7 @@ async fn execute_one<C: TrqpClient + ?Sized>(
 
     let started = Instant::now();
     let joined = AtomicBool::new(false);
-    let query = client.query_shared(&elem.trust_registry_id, elem.query_type, &resolved, &joined);
+    let query = client.query(&elem.trust_registry_id, elem.query_type, &resolved, &joined);
     let outcome = match elem.timeout_secs {
         Some(secs) => timeout(Duration::from_secs(secs as u64), query)
             .await
@@ -596,6 +588,7 @@ mod tests {
             registry_id: &str,
             _query_type: TrqpQueryType,
             _params: &TrqpQueryParams,
+            _joined: &AtomicBool,
         ) -> Result<TrqpOutcome, TrqpClientError> {
             let idx = self
                 .dispatched
@@ -1037,15 +1030,6 @@ mod tests {
     #[async_trait]
     impl TrqpClient for JoiningClient {
         async fn query(
-            &self,
-            _registry_id: &str,
-            _query_type: TrqpQueryType,
-            _params: &TrqpQueryParams,
-        ) -> Result<TrqpOutcome, TrqpClientError> {
-            Ok(TrqpOutcome::Allowed)
-        }
-
-        async fn query_shared(
             &self,
             _registry_id: &str,
             _query_type: TrqpQueryType,

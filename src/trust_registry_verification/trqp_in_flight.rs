@@ -110,22 +110,29 @@ impl InFlightQueries {
         }
     }
 
-    /// Answer `query`, sharing it with identical in-flight requests. Sets
-    /// `joined` when this request awaits a query another request started.
-    pub(crate) async fn run<F>(
+    /// Answer `query`, sharing it with identical in-flight requests. A
+    /// request that finds a query another request started awaits `admit_join`
+    /// first: an error refuses the request, otherwise `joined` is set and the
+    /// request awaits that query. `admit_join` is not polled for a request
+    /// that sends `query` itself.
+    pub(crate) async fn run<F, A>(
         &self,
         key: QueryKey,
         query: F,
+        admit_join: A,
         joined: &AtomicBool,
     ) -> QueryResult
     where
         F: Future<Output = QueryResult> + Send + 'static,
+        A: Future<Output = Result<(), TrqpClientError>>,
     {
         match self.join_or_start(key, query) {
-            Ok((shared, was_joined)) => {
-                joined.store(was_joined, Ordering::Relaxed);
+            Ok((shared, true)) => {
+                admit_join.await?;
+                joined.store(true, Ordering::Relaxed);
                 shared.await
             }
+            Ok((shared, false)) => shared.await,
             Err(query) => query.await,
         }
     }
@@ -288,6 +295,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    async fn admitted() -> Result<(), TrqpClientError> {
+        Ok(())
+    }
+
     async fn allowed() -> QueryResult {
         Ok(TrqpOutcome::Allowed)
     }
@@ -306,8 +317,8 @@ mod tests {
 
         let leader_joined = AtomicBool::new(false);
         let joiner_joined = AtomicBool::new(false);
-        let leader = in_flight.run(key("did:web:assistant"), gated_query(&sends, gate), &leader_joined);
-        let joiner = in_flight.run(key("did:web:assistant"), gated_query(&sends, unused_gate), &joiner_joined);
+        let leader = in_flight.run(key("did:web:assistant"), gated_query(&sends, gate), admitted(), &leader_joined);
+        let joiner = in_flight.run(key("did:web:assistant"), gated_query(&sends, unused_gate), admitted(), &joiner_joined);
         let (leader, joiner, ()) = tokio::join!(leader, joiner, async {
             settle().await;
             release
@@ -325,6 +336,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_join_does_not_await_the_query_and_a_sender_is_not_asked() {
+        let in_flight = InFlightQueries::default();
+        let sends = Arc::new(AtomicUsize::new(0));
+        let (release, gate) = oneshot::channel();
+        let (unused_release, unused_gate) = oneshot::channel();
+        let refusal = || TrqpClientError::Unreachable("refused".to_string());
+        let leader_joined = AtomicBool::new(false);
+        let joiner_joined = AtomicBool::new(false);
+
+        let leader = in_flight.run(
+            key("did:web:assistant"),
+            gated_query(&sends, gate),
+            async { Err(refusal()) },
+            &leader_joined,
+        );
+        let joiner = async {
+            settle().await;
+            let refused = in_flight
+                .run(
+                    key("did:web:assistant"),
+                    gated_query(&sends, unused_gate),
+                    async { Err(refusal()) },
+                    &joiner_joined,
+                )
+                .await;
+            release
+                .send(Ok(TrqpOutcome::Allowed))
+                .expect("query awaiting its answer");
+            refused
+        };
+        let (leader, joiner) = tokio::join!(leader, joiner);
+        drop(unused_release);
+
+        assert_eq!(leader, Ok(TrqpOutcome::Allowed));
+        assert_eq!(joiner, Err(refusal()));
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+        assert!(!leader_joined.load(Ordering::Relaxed));
+        assert!(!joiner_joined.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
     async fn different_queries_are_not_shared() {
         let in_flight = InFlightQueries::default();
         let sends = Arc::new(AtomicUsize::new(0));
@@ -334,8 +386,8 @@ mod tests {
         let joined_b = AtomicBool::new(false);
 
         let (a, b, ()) = tokio::join!(
-            in_flight.run(key("did:web:assistant-a"), gated_query(&sends, gate_a), &joined_a),
-            in_flight.run(key("did:web:assistant-b"), gated_query(&sends, gate_b), &joined_b),
+            in_flight.run(key("did:web:assistant-a"), gated_query(&sends, gate_a), admitted(), &joined_a),
+            in_flight.run(key("did:web:assistant-b"), gated_query(&sends, gate_b), admitted(), &joined_b),
             async {
                 settle().await;
                 release_a
@@ -403,7 +455,7 @@ mod tests {
                 .expect("gate open");
             let joined = AtomicBool::new(false);
             let answer = in_flight
-                .run(key("did:web:assistant"), gated_query(&sends, gate), &joined)
+                .run(key("did:web:assistant"), gated_query(&sends, gate), admitted(), &joined)
                 .await;
             assert_eq!(answer, Ok(TrqpOutcome::Allowed));
             assert!(!joined.load(Ordering::Relaxed));
@@ -422,8 +474,8 @@ mod tests {
         let failure = TrqpClientError::Unreachable("no connection".to_string());
 
         let (first, second, ()) = tokio::join!(
-            in_flight.run(key("did:web:assistant"), gated_query(&sends, gate), &joined[0]),
-            in_flight.run(key("did:web:assistant"), gated_query(&sends, unused_gate), &joined[1]),
+            in_flight.run(key("did:web:assistant"), gated_query(&sends, gate), admitted(), &joined[0]),
+            in_flight.run(key("did:web:assistant"), gated_query(&sends, unused_gate), admitted(), &joined[1]),
             async {
                 settle().await;
                 release
@@ -443,8 +495,8 @@ mod tests {
         let in_flight = InFlightQueries::default();
         let joined = [AtomicBool::new(false), AtomicBool::new(false)];
         let (first, second) = tokio::join!(
-            in_flight.run(key("did:web:assistant"), panicking_query(), &joined[0]),
-            in_flight.run(key("did:web:assistant"), allowed(), &joined[1]),
+            in_flight.run(key("did:web:assistant"), panicking_query(), admitted(), &joined[0]),
+            in_flight.run(key("did:web:assistant"), allowed(), admitted(), &joined[1]),
         );
 
         assert!(matches!(first, Err(TrqpClientError::QueryFailed(_))));
@@ -464,7 +516,7 @@ mod tests {
             let query = gated_query(&sends, gate);
             async move {
                 in_flight
-                    .run(key("did:web:assistant"), query, &AtomicBool::new(false))
+                    .run(key("did:web:assistant"), query, admitted(), &AtomicBool::new(false))
                     .await
             }
         });
@@ -474,7 +526,7 @@ mod tests {
             async move {
                 let joined = AtomicBool::new(false);
                 let answer = in_flight
-                    .run(key("did:web:assistant"), allowed(), &joined)
+                    .run(key("did:web:assistant"), allowed(), admitted(), &joined)
                     .await;
                 (answer, joined.load(Ordering::Relaxed))
             }
@@ -516,9 +568,9 @@ mod tests {
         let joined = [AtomicBool::new(false), AtomicBool::new(false), AtomicBool::new(false)];
 
         let (held, overflow, joiner, ()) = tokio::join!(
-            in_flight.run(key("did:web:assistant-a"), gated_query(&sends, gate), &joined[0]),
-            in_flight.run(key("did:web:assistant-b"), gated_query(&sends, own_gate), &joined[1]),
-            in_flight.run(key("did:web:assistant-a"), gated_query(&sends, unused_gate), &joined[2]),
+            in_flight.run(key("did:web:assistant-a"), gated_query(&sends, gate), admitted(), &joined[0]),
+            in_flight.run(key("did:web:assistant-b"), gated_query(&sends, own_gate), admitted(), &joined[1]),
+            in_flight.run(key("did:web:assistant-a"), gated_query(&sends, unused_gate), admitted(), &joined[2]),
             async {
                 settle().await;
                 assert_eq!(in_flight.len(), 1);
@@ -549,7 +601,7 @@ mod tests {
 
         let in_flight = InFlightQueries::default();
         let joined = AtomicBool::new(false);
-        let answer = futures::executor::block_on(in_flight.run(key("did:web:assistant"), allowed(), &joined));
+        let answer = futures::executor::block_on(in_flight.run(key("did:web:assistant"), allowed(), admitted(), &joined));
 
         assert!(matches!(answer, Err(TrqpClientError::QueryFailed(_))));
         assert_eq!(in_flight.len(), 0);
@@ -565,7 +617,7 @@ mod tests {
         tokio::spawn(async move {
             let joined = AtomicBool::new(false);
             let answer = in_flight
-                .run(key("did:web:assistant"), query, &joined)
+                .run(key("did:web:assistant"), query, admitted(), &joined)
                 .await;
             (answer, joined.load(Ordering::Relaxed))
         })
@@ -667,8 +719,8 @@ mod tests {
         let joined = [AtomicBool::new(false), AtomicBool::new(false)];
 
         let (first, second) = tokio::join!(
-            in_flight.run(key("did:web:assistant"), std::future::pending(), &joined[0]),
-            in_flight.run(key("did:web:assistant"), allowed(), &joined[1]),
+            in_flight.run(key("did:web:assistant"), std::future::pending(), admitted(), &joined[0]),
+            in_flight.run(key("did:web:assistant"), allowed(), admitted(), &joined[1]),
         );
 
         assert!(matches!(first, Err(TrqpClientError::QueryFailed(_))));
