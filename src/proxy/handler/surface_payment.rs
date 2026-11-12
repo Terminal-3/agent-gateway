@@ -332,15 +332,7 @@ impl<'surface> LocalPayment<'surface> {
         signature_header: &str,
     ) -> Self {
         let protocol = surface.channel_protocol();
-        let x402 = surface
-            .x402_config()
-            .filter(|config| {
-                config.provider != crate::config::types::X402Provider::AgentPay
-                    && crate::x402::should_require_payment(config, &protocol, body, mcp_context)
-            });
-        let mpp = surface
-            .mpp_config()
-            .filter(|config| crate::mpp::should_require_payment(config, &protocol, body, mcp_context));
+        let (x402, mpp) = Self::rails(surface, &protocol, body, mcp_context);
         let (signature, credential, body) = if x402.is_none() && mpp.is_none() {
             (None, None, body.to_vec())
         } else if protocol == crate::config::ChannelProtocol::Mcp {
@@ -364,6 +356,28 @@ impl<'surface> LocalPayment<'surface> {
         }
     }
 
+    /// The local rails whose payment requirement applies to this request.
+    fn rails(
+        surface: &'surface crate::config::agent_surface::AgentSurface,
+        protocol: &crate::config::ChannelProtocol,
+        body: &[u8],
+        mcp_context: Option<&McpContext>,
+    ) -> (
+        Option<&'surface crate::config::types::X402Config>,
+        Option<&'surface crate::mpp::types::MppConfig>,
+    ) {
+        let x402 = surface
+            .x402_config()
+            .filter(|config| {
+                config.provider != crate::config::types::X402Provider::AgentPay
+                    && crate::x402::should_require_payment(config, protocol, body, mcp_context)
+            });
+        let mpp = surface
+            .mpp_config()
+            .filter(|config| crate::mpp::should_require_payment(config, protocol, body, mcp_context));
+        (x402, mpp)
+    }
+
     pub(crate) fn unpaid(&self) -> bool {
         (self.x402.is_some() || self.mpp.is_some())
             && !(self.x402.is_some() && self.signature.is_some() || self.mpp.is_some() && self.credential.is_some())
@@ -374,26 +388,11 @@ impl<'surface> LocalPayment<'surface> {
 /// [`process`] would verify or settle a payment for it.
 pub(super) fn prices(
     state: &ProxyState,
-    headers: &HeaderMap,
     body: &[u8],
     mcp_context: Option<&McpContext>,
 ) -> bool {
-    let inspected = LocalPayment::inspect(
-        &state.surface,
-        headers,
-        body,
-        mcp_context,
-        &state
-            .config
-            .x402_headers
-            .payment_signature,
-    );
-    inspected
-        .x402
-        .is_some()
-        || inspected
-            .mpp
-            .is_some()
+    let (x402, mpp) = LocalPayment::rails(&state.surface, &state.surface.channel_protocol(), body, mcp_context);
+    x402.is_some() || mpp.is_some()
 }
 
 pub(super) fn is_unpaid(

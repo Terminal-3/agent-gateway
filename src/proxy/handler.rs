@@ -3966,7 +3966,7 @@ async fn proxy_handler_with_mcp_runtime(
     let vets_target = forward_client.is_none() && !is_a2a_proxy_target && !is_mcp_proxy_target;
     if vets_target
         && !defer_surface_payment
-        && surface_payment::prices(&state, &headers, &body_bytes, mcp_context.as_ref())
+        && surface_payment::prices(&state, &body_bytes, mcp_context.as_ref())
     {
         match target_vetting::TargetVetting::start(&state, &channel_name, &target_url)
             .finish(&channel_name, &audit_facts)
