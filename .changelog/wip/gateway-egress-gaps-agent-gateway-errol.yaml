@@ -13,7 +13,8 @@ changes:
         proxy configured, it cannot reach an address the Target's host re-resolves to; a
         configured proxy resolves the host itself. A cached Legacy SSE session is reused
         only when every address it is pinned to was vetted for the request; otherwise a new
-        session replaces it. With no vetted client the retry is refused with `403`
+        session replaces it. Fabric receive and MCP tool discovery, which share the session
+        cache, follow the same rule. With no vetted client the retry is refused with `403`
         "Request blocked by egress policy".
     - timestamp: '2026-11-12T00:00:00Z'
       title: Vet the Target before delegating a payment for an Access Point request
