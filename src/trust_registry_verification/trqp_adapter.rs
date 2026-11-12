@@ -136,6 +136,12 @@ impl TrqpClient for TrqpListenerClient {
         let query = send_query(Arc::clone(&self.manager), registry_did, query_type, request);
         match key {
             Some(key) => {
+                // A request that joins a query never reaches the send path's
+                // check for a registry marked Failed.
+                self.manager
+                    .ensure_not_marked_failed(registry_id)
+                    .await
+                    .map_err(map_error)?;
                 self.manager
                     .trqp_in_flight()
                     .run(key, query, joined)

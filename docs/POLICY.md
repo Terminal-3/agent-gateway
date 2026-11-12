@@ -125,7 +125,12 @@ template syntax.
 
 Requests that would send byte-for-byte the same TRQP query (same registry, query type,
 authority, entity, action and resource) while one is already waiting for its answer share that
-query instead of sending their own. The shared query runs on its own, so a request that is
+query instead of sending their own, provided that query was sent less than 2 seconds earlier.
+A request that finds only an older one sends its own query, and later identical requests share
+that newer query; requests already waiting on the older one still get its answer. A request
+to a registry marked Failed is refused before it can share a query, as a send to it would be.
+Up to 1,024 distinct queries are shared at once; past that, a request whose query is not
+already shared sends its own. The shared query runs on its own, so a request that is
 cancelled does not cancel it for the others; an error or timeout fails each waiting request as
 if it had sent the query, and a shared query still unanswered after 30 seconds fails for all of
 them. Nothing is kept once the answer is delivered: a later request always

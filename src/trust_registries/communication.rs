@@ -1702,6 +1702,21 @@ impl TrustRegistryListenerManager {
         Ok(registry.is_some_and(|registry| registry.connection_status == TrustRegistryConnectionStatus::Failed))
     }
 
+    /// Refuses a query to `trust_registry_id` while its stored record is
+    /// Failed, as a send to its live connection is refused.
+    pub(crate) async fn ensure_not_marked_failed(
+        &self,
+        trust_registry_id: &str,
+    ) -> Result<(), TrustRegistryError> {
+        if self
+            .is_marked_failed(trust_registry_id)
+            .await?
+        {
+            return Err(marked_failed(trust_registry_id));
+        }
+        Ok(())
+    }
+
     /// Get active connection count
     #[allow(dead_code)]
     pub async fn active_connection_count(&self) -> usize {
@@ -4168,6 +4183,69 @@ mod tests {
                 .await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn a_query_for_a_registry_marked_failed_does_not_join_an_in_flight_one() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::trust_registry_verification::trqp_adapter::TrqpListenerClient;
+        use crate::trust_registry_verification::trqp_in_flight::QueryKey;
+        use crate::trust_registry_verification::trust_check_element::{TrqpQueryParams, TrqpQueryType};
+        use crate::trust_registry_verification::trust_check_executor::{TrqpClient, TrqpClientError, TrqpOutcome};
+
+        let (mgr, store, _dir) = owned_manager(60).await;
+        let mut registry = stored_with_identity(&store, TrustRegistryConnectionStatus::Connected).await;
+        let params = TrqpQueryParams {
+            authority_id: "did:web:bank".to_string(),
+            entity_id: "did:web:assistant".to_string(),
+            action: Some("bank:assistant".to_string()),
+            resource: Some("merlion-bank".to_string()),
+        };
+        let request = TrqpQueryRequest {
+            authority_id: params.authority_id.clone(),
+            entity_id: params.entity_id.clone(),
+            action: "bank:assistant".to_string(),
+            resource: "merlion-bank".to_string(),
+        };
+        let key = QueryKey::new(&registry.id, &registry_did_of(&registry), TrqpQueryType::Authorization, &request)
+            .expect("key");
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let in_flight = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                let query = async move {
+                    gate.await
+                        .unwrap_or_else(|_| Err(TrqpClientError::QueryFailed("released without an answer".to_string())))
+                };
+                mgr.trqp_in_flight()
+                    .run(key, query, &AtomicBool::new(false))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        registry.connection_status = TrustRegistryConnectionStatus::Failed;
+        assert!(
+            crate::trust_registries::store::overwrite(store.as_ref(), &registry)
+                .await
+                .expect("update")
+        );
+        let joined = AtomicBool::new(false);
+        let refused = TrqpListenerClient::new(Arc::clone(&mgr))
+            .query_shared(&registry.id, TrqpQueryType::Authorization, &params, &joined)
+            .await;
+
+        assert!(
+            matches!(&refused, Err(TrqpClientError::Unreachable(msg)) if msg.contains("marked Failed")),
+            "got {:?}",
+            refused
+        );
+        assert!(!joined.load(Ordering::Relaxed));
+        release
+            .send(Ok(TrqpOutcome::Allowed))
+            .expect("in-flight query waiting");
+        assert_eq!(in_flight.await.expect("in-flight query"), Ok(TrqpOutcome::Allowed));
     }
 
     #[tokio::test]
