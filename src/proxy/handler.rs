@@ -2208,14 +2208,16 @@ async fn proxy_handler_with_mcp_runtime(
 
     // Extract body early for payment verification and fabric forwarding
     // Body is needed to check payment requirements based on request content
-    let mut body_bytes = axum::body::to_bytes(
+    let body_read_started = std::time::Instant::now();
+    let body_read = axum::body::to_bytes(
         req.into_body(),
         mcp_http
             .as_ref()
             .map_or(usize::MAX, |policy| policy.body_limit()),
     )
-    .await
-    .map_err(|e| {
+    .await;
+    request_timing.body_read(body_read_started.elapsed());
+    let mut body_bytes = body_read.map_err(|e| {
         error!(channel = channel_name, error = %e, "Failed to read request body");
         // Track error (connection guard will be dropped automatically)
         if let (Some(task_monitor), Some(task_id)) = (&state.task_monitor, &state.task_id) {
@@ -3987,6 +3989,15 @@ async fn proxy_handler_with_mcp_runtime(
             Err(blocked) => return Ok(blocked),
         }
     }
+    if !is_a2a_proxy_target && !is_mcp_proxy_target {
+        match target_grant.as_ref() {
+            Some(route) => {
+                request_timing.egress_client(crate::proxy::request_timing::EgressClient::GrantRoute);
+                request_timing.grant_client_build(route.client_build());
+            }
+            None => request_timing.egress_client(crate::proxy::request_timing::EgressClient::Pinned),
+        }
+    }
 
     if !is_a2a_proxy_target {
         debug!(channel = channel_name, target = %loggable::url(&target_url), "Forwarding to upstream");
@@ -5380,22 +5391,26 @@ async fn proxy_handler_with_mcp_runtime(
             probe_input.identity_binding = identity_binding.clone();
             probe_input.normalize_caller_did();
             let trust_check_started = std::time::Instant::now();
-            trust_check_results = crate::audit::context::with_caller(
-                authenticated_identity
-                    .as_ref()
-                    .map(crate::delegation_vault::audit::build_caller_context),
-                crate::trust_registry_verification::run_caller_trust_check(
-                    state
-                        .surface
-                        .surface_id
-                        .as_str(),
-                    caller_elements,
-                    &probe_input,
-                    &client,
+            let (results, slowest_query) = crate::trust_registries::query_timing::collect(
+                request_timing.enabled(),
+                crate::audit::context::with_caller(
+                    authenticated_identity
+                        .as_ref()
+                        .map(crate::delegation_vault::audit::build_caller_context),
+                    crate::trust_registry_verification::run_caller_trust_check(
+                        state
+                            .surface
+                            .surface_id
+                            .as_str(),
+                        caller_elements,
+                        &probe_input,
+                        &client,
+                    ),
                 ),
             )
             .await;
-            request_timing.trust_check(trust_check_started.elapsed(), caller_elements.len());
+            trust_check_results = results;
+            request_timing.trust_check(trust_check_started.elapsed(), caller_elements.len(), slowest_query);
         }
     }
 
@@ -7452,8 +7467,9 @@ async fn proxy_handler_with_mcp_runtime(
                     .timeout()
                     .map_or(30, |timeout| timeout.request_secs),
             );
-            tokio::time::timeout(deadline, execute)
-                .await
+            let executed = tokio::time::timeout(deadline, execute).await;
+            request_timing.mcp_proxy(request_latency_start.elapsed());
+            executed
                 .map_err(|_| create_error_response(StatusCode::GATEWAY_TIMEOUT, "MCP proxy execution timed out"))?
                 .map_err(|error| (*error).into_response())
         };
@@ -7591,6 +7607,7 @@ async fn proxy_handler_with_mcp_runtime(
     };
 
     // Wrap in circuit breaker if configured
+    let mut breaker_open = false;
     let send_response = async {
         let upstream_response = if let Some(cb) = circuit_breaker {
             match cb
@@ -7602,6 +7619,7 @@ async fn proxy_handler_with_mcp_runtime(
                     response
                 }
                 Err(crate::policies::CircuitBreakerError::Open { retry_after }) => {
+                    breaker_open = true;
                     error!(
                         channel = channel_name,
                         retry_after = ?retry_after,
@@ -7660,7 +7678,7 @@ async fn proxy_handler_with_mcp_runtime(
     } else {
         send_response.await
     };
-    if sent_upstream {
+    if sent_upstream && !breaker_open {
         request_timing.upstream(request_latency_start.elapsed());
     }
     let upstream_response = upstream_response?;
@@ -15172,20 +15190,24 @@ async fn evaluate_mcp_proxy_opa_policies(
         {
             let client = crate::trust_registry_verification::TrqpListenerClient::new(manager);
             let trust_check_started = std::time::Instant::now();
-            policy_input.trust_check_results = crate::audit::context::with_caller(
-                authenticated_identity.map(crate::delegation_vault::audit::build_caller_context),
-                crate::trust_registry_verification::run_caller_trust_check(
-                    state
-                        .surface
-                        .surface_id
-                        .as_str(),
-                    caller_elements,
-                    &policy_input,
-                    &client,
+            let (results, slowest_query) = crate::trust_registries::query_timing::collect(
+                request_timing.enabled(),
+                crate::audit::context::with_caller(
+                    authenticated_identity.map(crate::delegation_vault::audit::build_caller_context),
+                    crate::trust_registry_verification::run_caller_trust_check(
+                        state
+                            .surface
+                            .surface_id
+                            .as_str(),
+                        caller_elements,
+                        &policy_input,
+                        &client,
+                    ),
                 ),
             )
             .await;
-            request_timing.trust_check(trust_check_started.elapsed(), caller_elements.len());
+            policy_input.trust_check_results = results;
+            request_timing.trust_check(trust_check_started.elapsed(), caller_elements.len(), slowest_query);
         }
     }
 

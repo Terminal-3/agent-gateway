@@ -3,6 +3,7 @@ pub mod did_manager;
 pub mod filesystem;
 pub mod handlers;
 pub mod q3_resource_config;
+pub(crate) mod query_timing;
 pub mod reader;
 pub mod reference_fields;
 pub mod store;
