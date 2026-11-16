@@ -10,7 +10,6 @@
 //! |---|---|---|---|
 //! | [`external`] | 30 s | `none` | OAuth token exchange, webhooks, integrations |
 //! | [`with_short_timeout`] | 10 s | `none` | JWKS fetch, low-latency probes |
-//! | [`health_checker`] | 10 s | follows | Health-check probes (endpoints may redirect) |
 //! | [`with_timeout`] | caller-supplied | `none` | Pipe executors with per-target timeouts |
 //! | [`proxy_with_timeout`] | caller-supplied | `none` | Internal proxy hop with connection pooling |
 //!
@@ -90,8 +89,7 @@ fn tls_config(
     provider: Arc<CryptoProvider>,
     verifier: Arc<dyn ServerCertVerifier>,
 ) -> Result<ClientConfig, rustls::Error> {
-    // `dangerous()` is the only route to a custom verifier; the platform
-    // verifier still checks the chain and the hostname.
+    // The platform verifier checks the chain and the hostname.
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(rustls::ALL_VERSIONS)?
         .dangerous()
@@ -107,8 +105,7 @@ fn shared_tls_config() -> Result<ClientConfig, rustls::Error> {
     tls_config(provider, Arc::new(verifier))
 }
 
-/// A clone of `config` with a new session cache. Clones otherwise share the
-/// cache, which would let one client resume another's TLS session.
+/// A clone of `config` with its own, empty session cache.
 fn fresh(config: &ClientConfig) -> ClientConfig {
     let mut config = config.clone();
     config.resumption = Resumption::default();
@@ -281,6 +278,19 @@ mod tests {
             source = cause.source();
         }
         chain
+    }
+
+    /// The shared configuration carries the settings reqwest applies on its
+    /// own rustls path, which it does not add to a preconfigured backend.
+    #[test]
+    fn the_shared_tls_configuration_matches_reqwest_defaults() {
+        super::init_tls().unwrap();
+        let config = super::TLS
+            .as_ref()
+            .unwrap();
+        assert_eq!(config.alpn_protocols, [b"h2".to_vec(), b"http/1.1".to_vec()]);
+        assert!(config.enable_sni);
+        assert!(!config.client_auth_cert_resolver.has_certs());
     }
 
     #[test]
