@@ -205,6 +205,9 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
+    // Below the local-only commands, so they still run on a host without a CA store.
+    http_client::init_tls()?;
+
     // Check for a staged backup (backup.agbak / legacy backup.tgwbak) and perform restore if present
     {
         let storage_root = export::resolve_storage_root(

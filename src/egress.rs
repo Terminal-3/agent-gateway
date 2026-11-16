@@ -249,13 +249,14 @@ fn validate_and_pin_inner(
 
 /// Builds a redirect-disabled client pinned to `target`'s vetted addresses.
 ///
-/// `resolve_to_addrs` is builder-only in reqwest 0.13, so a fresh client is
-/// built per pinned target, which is acceptable for guarded egress.
+/// `resolve_to_addrs` is builder-only in reqwest 0.13, so one client is built
+/// per pinned target; every such client shares the TLS configuration built at
+/// start-up (see [`crate::http_client::builder`]).
 fn pinned_client(
     target: &PinnedTarget,
     timeout: Duration,
 ) -> Result<Client, EgressError> {
-    Client::builder()
+    crate::http_client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(&target.host, &target.addrs)
@@ -272,7 +273,7 @@ fn pinned_direct_client(
     target: &PinnedTarget,
     timeout: Duration,
 ) -> Result<Client, EgressError> {
-    Client::builder()
+    crate::http_client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
@@ -339,7 +340,7 @@ fn pin_and_build(
 pub(crate) struct PinTimings {
     /// Resolving the host with the OS resolver and vetting every address.
     pub(crate) resolve: Option<Duration>,
-    /// Building the pinned client, which loads the platform CA store.
+    /// Building the pinned client from the TLS configuration built at start-up.
     pub(crate) build: Option<Duration>,
 }
 
