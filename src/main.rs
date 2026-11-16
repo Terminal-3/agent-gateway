@@ -150,7 +150,6 @@ async fn async_main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install rustls crypto provider"))?;
-    http_client::init_tls()?;
 
     // Initialize dashboard start time
     observability::init_start_time();
@@ -205,6 +204,9 @@ async fn async_main() -> Result<()> {
         export::export_storage(&storage_root, output_path)?;
         return Ok(());
     }
+
+    // Below the local-only commands, so they still run on a host without a CA store.
+    http_client::init_tls()?;
 
     // Check for a staged backup (backup.agbak / legacy backup.tgwbak) and perform restore if present
     {
