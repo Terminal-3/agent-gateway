@@ -150,6 +150,7 @@ async fn async_main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install rustls crypto provider"))?;
+    http_client::init_tls()?;
 
     // Initialize dashboard start time
     observability::init_start_time();

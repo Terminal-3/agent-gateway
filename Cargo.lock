@@ -735,6 +735,7 @@ dependencies = [
  "rustls-native-certs",
  "rustls-pemfile",
  "rustls-pki-types",
+ "rustls-platform-verifier 0.7.0",
  "rustls-webpki",
  "samael",
  "scopeguard",

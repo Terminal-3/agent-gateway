@@ -473,7 +473,8 @@ partner requests an agent handles as intended, not those of an agent that sends 
 sinks vets the target
 with the DNS-aware cloud-metadata-only policy (cloud metadata blocked; loopback +
 RFC 1918 allowed for localhost-sidecar/same-VPC forwards), resolves DNS **once**,
-and forwards through a per-request `reqwest::Client` **pinned** to that exact
+and forwards through a per-request `reqwest::Client`, sharing one TLS
+configuration with no session resumption across requests, **pinned** to that exact
 resolved address via `resolve_to_addrs` (TLS SNI preserved) with **redirects
 disabled** — so a host cannot rebind to an internal/metadata IP between vetting
 and connect, and an upstream 3xx is returned to the caller rather than followed.

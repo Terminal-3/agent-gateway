@@ -227,7 +227,7 @@ and a stage that did not run is left out.
 | `pin_ms` | Waiting for the blocking task that resolves, vets and pins the Target and builds its client |
 | `pin_queue_ms` | From submitting that task until it starts on a blocking thread |
 | `pin_resolve_ms` | Resolving the Target's host with the OS resolver and vetting the addresses |
-| `pin_build_ms` | Building the pinned client, which loads the platform CA store |
+| `pin_build_ms` | Building the pinned client from the TLS configuration loaded at start-up |
 | `grant_client_ms` | Resolving, vetting and building the client of a Target grant's route, when the request carries a grant; recorded too when Strict egress refuses the build |
 | `identity_ms` | Caller identity resolution and identity VP verification before the Trust Check; when the request is refused there, up to the end of the request |
 | `trust_check_ms`, `trust_checks` | The caller-leg Trust Check and the number of checks in its list, on `proxy://` MCP Proxies as well |

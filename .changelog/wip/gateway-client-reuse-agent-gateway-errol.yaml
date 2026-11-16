@@ -1,0 +1,17 @@
+branch: gateway-client-reuse-agent-gateway-errol
+changes:
+  added: []
+  changed:
+    - timestamp: '2026-11-16T12:00:00Z'
+      title: Load the CA store once at start-up instead of on every egress request
+      description: >-
+        Each outbound request's client reuses one TLS configuration built at start-up instead of
+        reading and parsing the system CA store again, which took 115–280 ms per request on Linux.
+        Resolve, vet and pin per request, refused redirects, per-request timeouts, certificate and
+        hostname checks and the proxy behaviour are unchanged. No TLS session is resumed across
+        requests. The gateway reads the system CA store once at start-up, so it picks up changes
+        to that store only on restart, and it does not start if it cannot load the store.
+  fixed: []
+  removed: []
+  security: []
+  breaking: []

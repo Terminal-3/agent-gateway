@@ -31,6 +31,7 @@ rustls = { version = "0.23.46", default-features = false, features = [
 ] }
 rustls-pemfile = "2.2.0"
 rustls-native-certs = "0.8.3"
+rustls-platform-verifier = "0.7"
 
 # Serialization
 strum = { version = "0.27", features = ["derive"] }
