@@ -3195,6 +3195,12 @@ async fn proxy_handler_with_mcp_runtime(
     {
         Ok(route) => route,
         Err(refused) => {
+            if let Some(build) = refused
+                .extensions()
+                .get::<crate::proxy::target_grant::GrantClientBuild>()
+            {
+                request_timing.grant_client_build(build.0);
+            }
             connection_guard
                 .decrement()
                 .await;
@@ -4309,6 +4315,7 @@ async fn proxy_handler_with_mcp_runtime(
                 .is_none();
 
             // Process through the proxy handler (reuses existing handle_mcp_proxy_request flow)
+            let mcp_proxy_started = std::time::Instant::now();
             let response = handle_mcp_proxy_request(
                 &state,
                 proxy_id,
@@ -4326,6 +4333,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
             )
             .await;
+            request_timing.mcp_proxy(mcp_proxy_started.elapsed());
 
             match response {
                 Ok(resp) if !is_notification => {
@@ -4412,6 +4420,7 @@ async fn proxy_handler_with_mcp_runtime(
             let proxy_id = &state.surface.target.endpoint[8..];
             channel_info!(config_id, "🔌 Streamable HTTP for proxy:// channel proxy_id={}", proxy_id);
 
+            let mcp_proxy_started = std::time::Instant::now();
             let response = handle_mcp_proxy_request(
                 &state,
                 proxy_id,
@@ -4429,6 +4438,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
             )
             .await;
+            request_timing.mcp_proxy(mcp_proxy_started.elapsed());
 
             // Treat in-protocol Err responses (HTTP 200 + JSON-RPC envelope,
             // e.g. disabled proxy / unknown tool) the same as Ok responses
@@ -4523,7 +4533,8 @@ async fn proxy_handler_with_mcp_runtime(
             let proxy_id = &state.surface.target.endpoint[8..]; // Extract ID after "proxy://"
             channel_info!(config_id, "🔌 Routing MCP request through proxy backend proxy_id={}", proxy_id);
 
-            match handle_mcp_proxy_request(
+            let mcp_proxy_started = std::time::Instant::now();
+            let proxied = handle_mcp_proxy_request(
                 &state,
                 proxy_id,
                 &body_bytes,
@@ -4539,8 +4550,9 @@ async fn proxy_handler_with_mcp_runtime(
                 &policy_input,
                 mcp_context.as_ref(),
             )
-            .await
-            {
+            .await;
+            request_timing.mcp_proxy(mcp_proxy_started.elapsed());
+            match proxied {
                 Ok(response) => {
                     // Decrement connection counter
                     connection_guard

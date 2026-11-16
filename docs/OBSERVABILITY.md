@@ -220,7 +220,7 @@ and a stage that did not run is left out.
 | `mcp_method` | The JSON-RPC method, or `invalid` when it is longer than 64 characters or has characters outside letters, digits and `/ _ - . $` |
 | `target` | The Target's `host:port` |
 | `in_flight` | Proxy requests whose handler was running when this one started, on every surface, this one included |
-| `egress_client` | The client the request was forwarded with: `pinned` (built by the pin step) or `grant_route` (built for a Target grant); both are built for the one request, so the send opens a new connection; left out when the request was not forwarded with either |
+| `egress_client` | The client prepared for forwarding the request: `pinned` (built by the pin step) or `grant_route` (built for a Target grant). It is set before the policy gates and the circuit breaker, so a refused request can carry it without the Target being contacted. Both are built for the one request, so a send opens a new connection; left out when neither was prepared, as for `proxy://` MCP Proxies |
 | `total_ms` | The whole handler |
 | `body_read_ms` | Reading the request body from the caller |
 | `before_classify_ms` | From the start of the request until it is classified as MCP, `body_read_ms` included |
@@ -228,7 +228,7 @@ and a stage that did not run is left out.
 | `pin_queue_ms` | From submitting that task until it starts on a blocking thread |
 | `pin_resolve_ms` | Resolving the Target's host with the OS resolver and vetting the addresses |
 | `pin_build_ms` | Building the pinned client, which loads the platform CA store |
-| `grant_client_ms` | Resolving, vetting and building the client of a Target grant's route, when the request carries a grant |
+| `grant_client_ms` | Resolving, vetting and building the client of a Target grant's route, when the request carries a grant; recorded too when Strict egress refuses the build |
 | `identity_ms` | Caller identity resolution and identity VP verification before the Trust Check; when the request is refused there, up to the end of the request |
 | `trust_check_ms`, `trust_checks` | The caller-leg Trust Check and the number of checks in its list, on `proxy://` MCP Proxies as well |
 | `trust_check_connection_ms` | Of the slowest registry query: looking up the registry's connection, or waiting for it to be built or rebuilt |

@@ -595,7 +595,11 @@ async fn route_unaudited(
             error = ?error.to_string(),
             "The Target of a request carrying a grant by binding was refused by Strict egress"
         );
-        unavailable(surface, mcp, body, "forward_refused_by_strict_egress")
+        let mut refused = unavailable(surface, mcp, body, "forward_refused_by_strict_egress");
+        refused
+            .extensions_mut()
+            .insert(GrantClientBuild(client_build));
+        refused
     })?;
     Ok(Some(TargetGrantRoute {
         binding: binding.clone(),
@@ -697,6 +701,11 @@ pub(crate) struct Caller<'a> {
     pub source_auth_failed: bool,
     pub facts: &'a crate::audit::request_events::RequestFacts<'a>,
 }
+
+/// The time spent resolving, vetting and building the client of a route
+/// whose build was refused, carried on the refusal's extensions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GrantClientBuild(pub(crate) std::time::Duration);
 
 impl TargetGrantRoute {
     /// The Strict client pinned to the provider's resource, which every
