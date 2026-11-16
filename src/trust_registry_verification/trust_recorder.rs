@@ -452,12 +452,16 @@ pub fn spawn_trust_recorder(
     let surface_id = surface.surface_id.clone();
     let tenant_id = surface.tenant_id.clone();
     let started_at = chrono::Utc::now();
+    let spawned = std::time::Instant::now();
     tokio::spawn(async move {
+        let queued = spawned.elapsed();
         let Some(store) = tr_manager.store().await else {
+            log_trust_recorder_timing(&surface_id, queued, None, spawned);
             return;
         };
         let resolved_issuer_did = resolve_surface_issuer_did(issuer_id.as_deref()).await;
         let display_name = resolve_recorder_display_name(&did, &surface_id).await;
+        let apply_started = std::time::Instant::now();
         let entries = apply_trust_recorder(
             &cfg,
             &did,
@@ -468,6 +472,8 @@ pub fn spawn_trust_recorder(
             store,
         )
         .await;
+        let apply = apply_started.elapsed();
+        let entry_count = entries.len();
         if let Some(status_store) = global_store()
             && let Err(e) = status_store
                 .record(&surface_id, &did, entries, started_at, chrono::Utc::now())
@@ -475,7 +481,28 @@ pub fn spawn_trust_recorder(
         {
             warn!(surface_id = %surface_id, error = %e, "Trust Recorder: failed to store status");
         }
+        log_trust_recorder_timing(&surface_id, queued, Some((apply, entry_count)), spawned);
     });
+}
+
+/// Writes the `Trust Recorder timing` line of one run. `applied` holds the
+/// apply duration and entry count, and is `None` when the registry store was
+/// unavailable and nothing was applied.
+fn log_trust_recorder_timing(
+    surface_id: &str,
+    queued: std::time::Duration,
+    applied: Option<(std::time::Duration, usize)>,
+    spawned: std::time::Instant,
+) {
+    use crate::proxy::request_timing::ms;
+    info!(
+        surface_id = %surface_id,
+        entries = applied.map(|(_, count)| count as u64),
+        queue_ms = ms(queued),
+        apply_ms = applied.map(|(apply, _)| ms(apply)),
+        total_ms = ms(spawned.elapsed()),
+        "Trust Recorder timing"
+    );
 }
 
 /// Look up `surface.issuer_id → Issuer.did` via the process-global

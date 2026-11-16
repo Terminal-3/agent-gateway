@@ -1559,6 +1559,15 @@ async fn proxy_handler_with_mcp_runtime(
 
     // Start timing the request
     let start_time = std::time::Instant::now();
+    let mut request_timing = crate::proxy::request_timing::RequestTiming::new(
+        state
+            .surface
+            .channel_protocol()
+            == crate::config::ChannelProtocol::Mcp,
+        start_time,
+        config_id,
+        &channel_name,
+    );
 
     // Trace id for this request. A trusted internal forward (fabric G2G / Transit
     // Point) carries the originating request's id in `X-Gateway-Trace-Id`; reusing
@@ -2199,14 +2208,16 @@ async fn proxy_handler_with_mcp_runtime(
 
     // Extract body early for payment verification and fabric forwarding
     // Body is needed to check payment requirements based on request content
-    let mut body_bytes = axum::body::to_bytes(
+    let body_read_started = std::time::Instant::now();
+    let body_read = axum::body::to_bytes(
         req.into_body(),
         mcp_http
             .as_ref()
             .map_or(usize::MAX, |policy| policy.body_limit()),
     )
-    .await
-    .map_err(|e| {
+    .await;
+    request_timing.body_read(body_read_started.elapsed());
+    let mut body_bytes = body_read.map_err(|e| {
         error!(channel = channel_name, error = %e, "Failed to read request body");
         // Track error (connection guard will be dropped automatically)
         if let (Some(task_monitor), Some(task_id)) = (&state.task_monitor, &state.task_id) {
@@ -2617,6 +2628,10 @@ async fn proxy_handler_with_mcp_runtime(
     } else {
         None
     };
+    match mcp_context.as_ref() {
+        Some(context) => request_timing.mcp_method(&context.method),
+        None => request_timing.mcp_method_from_body(&body_bytes),
+    }
 
     // Parse the A2A/AP2 message payload so policies can inspect the actual
     // agent content (`input.a2a`). Built after boundary Header Metadata
@@ -3180,6 +3195,12 @@ async fn proxy_handler_with_mcp_runtime(
     {
         Ok(route) => route,
         Err(refused) => {
+            if let Some(build) = refused
+                .extensions()
+                .get::<crate::proxy::target_grant::GrantClientBuild>()
+            {
+                request_timing.grant_client_build(build.0);
+            }
             connection_guard
                 .decrement()
                 .await;
@@ -3967,9 +3988,20 @@ async fn proxy_handler_with_mcp_runtime(
         .as_ref()
         .map(|route| route.client().clone());
     if forward_client.is_none() && !is_a2a_proxy_target && !is_mcp_proxy_target {
-        match pinned_target_client(&state, &channel_name, &target_url, &audit_facts).await {
+        let (pinned, pin_timing) = pinned_target_client_timed(&state, &channel_name, &target_url, &audit_facts).await;
+        request_timing.pin(&target_url, pin_timing);
+        match pinned {
             Ok(client) => forward_client = Some(client),
             Err(blocked) => return Ok(blocked),
+        }
+    }
+    if !is_a2a_proxy_target && !is_mcp_proxy_target {
+        match target_grant.as_ref() {
+            Some(route) => {
+                request_timing.egress_client(crate::proxy::request_timing::EgressClient::GrantRoute);
+                request_timing.grant_client_build(route.client_build());
+            }
+            None => request_timing.egress_client(crate::proxy::request_timing::EgressClient::Pinned),
         }
     }
 
@@ -4191,6 +4223,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
                 payment_context.as_ref(),
                 &trace_id,
+                &mut request_timing,
             )
             .await
             {
@@ -4250,6 +4283,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
                 payment_context.as_ref(),
                 &trace_id,
+                &mut request_timing,
             )
             .await
             {
@@ -4281,6 +4315,7 @@ async fn proxy_handler_with_mcp_runtime(
                 .is_none();
 
             // Process through the proxy handler (reuses existing handle_mcp_proxy_request flow)
+            let mcp_proxy_started = std::time::Instant::now();
             let response = handle_mcp_proxy_request(
                 &state,
                 proxy_id,
@@ -4298,6 +4333,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
             )
             .await;
+            request_timing.mcp_proxy(mcp_proxy_started.elapsed());
 
             match response {
                 Ok(resp) if !is_notification => {
@@ -4368,6 +4404,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
                 payment_context.as_ref(),
                 &trace_id,
+                &mut request_timing,
             )
             .await
             {
@@ -4383,6 +4420,7 @@ async fn proxy_handler_with_mcp_runtime(
             let proxy_id = &state.surface.target.endpoint[8..];
             channel_info!(config_id, "🔌 Streamable HTTP for proxy:// channel proxy_id={}", proxy_id);
 
+            let mcp_proxy_started = std::time::Instant::now();
             let response = handle_mcp_proxy_request(
                 &state,
                 proxy_id,
@@ -4400,6 +4438,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
             )
             .await;
+            request_timing.mcp_proxy(mcp_proxy_started.elapsed());
 
             // Treat in-protocol Err responses (HTTP 200 + JSON-RPC envelope,
             // e.g. disabled proxy / unknown tool) the same as Ok responses
@@ -4455,6 +4494,7 @@ async fn proxy_handler_with_mcp_runtime(
             return Ok(err_response);
         }
 
+        request_timing.classified();
         channel_info!(config_id, "Detected MCP request");
 
         // Check if this channel uses a proxy:// backend (MCP proxy)
@@ -4477,6 +4517,7 @@ async fn proxy_handler_with_mcp_runtime(
                 mcp_context.as_ref(),
                 payment_context.as_ref(),
                 &trace_id,
+                &mut request_timing,
             )
             .await
             {
@@ -4492,7 +4533,8 @@ async fn proxy_handler_with_mcp_runtime(
             let proxy_id = &state.surface.target.endpoint[8..]; // Extract ID after "proxy://"
             channel_info!(config_id, "🔌 Routing MCP request through proxy backend proxy_id={}", proxy_id);
 
-            match handle_mcp_proxy_request(
+            let mcp_proxy_started = std::time::Instant::now();
+            let proxied = handle_mcp_proxy_request(
                 &state,
                 proxy_id,
                 &body_bytes,
@@ -4508,8 +4550,9 @@ async fn proxy_handler_with_mcp_runtime(
                 &policy_input,
                 mcp_context.as_ref(),
             )
-            .await
-            {
+            .await;
+            request_timing.mcp_proxy(mcp_proxy_started.elapsed());
+            match proxied {
                 Ok(response) => {
                     // Decrement connection counter
                     connection_guard
@@ -4754,6 +4797,7 @@ async fn proxy_handler_with_mcp_runtime(
     // Use MPP receipt if available, otherwise None
     let payment_response_header: Option<String> = mpp_receipt_header;
     let mut modern_local_receipt = None;
+    request_timing.identity_started();
 
     // Inspect extensions if enabled and this is a POST with JSON body (A2A or MCP protocol)
     // Also capture if client supports credential extension for response VP injection
@@ -5309,6 +5353,8 @@ async fn proxy_handler_with_mcp_runtime(
     #[allow(unused_mut)]
     let mut body_bytes = body_bytes;
 
+    request_timing.identity_finished();
+
     // ── Trust Check stage (caller leg) ──────────────────────────────────────
     // Runs after the managed-identity resolver populates `extension_identity`
     // and before the inbound/surface OPA gates read `trust_check_results`, so
@@ -5356,21 +5402,27 @@ async fn proxy_handler_with_mcp_runtime(
             probe_input.payment = payment_context.clone();
             probe_input.identity_binding = identity_binding.clone();
             probe_input.normalize_caller_did();
-            trust_check_results = crate::audit::context::with_caller(
-                authenticated_identity
-                    .as_ref()
-                    .map(crate::delegation_vault::audit::build_caller_context),
-                crate::trust_registry_verification::run_caller_trust_check(
-                    state
-                        .surface
-                        .surface_id
-                        .as_str(),
-                    caller_elements,
-                    &probe_input,
-                    &client,
+            let trust_check_started = std::time::Instant::now();
+            let (results, slowest_query) = crate::trust_registries::query_timing::collect(
+                request_timing.enabled(),
+                crate::audit::context::with_caller(
+                    authenticated_identity
+                        .as_ref()
+                        .map(crate::delegation_vault::audit::build_caller_context),
+                    crate::trust_registry_verification::run_caller_trust_check(
+                        state
+                            .surface
+                            .surface_id
+                            .as_str(),
+                        caller_elements,
+                        &probe_input,
+                        &client,
+                    ),
                 ),
             )
             .await;
+            trust_check_results = results;
+            request_timing.trust_check(trust_check_started.elapsed(), caller_elements.len(), slowest_query);
         }
     }
 
@@ -7050,10 +7102,12 @@ async fn proxy_handler_with_mcp_runtime(
             delegation_actions_for_vp.clone(),
             authenticated_identity.as_ref(),
         );
-        match vc_issuer
+        let vp_mint_started = std::time::Instant::now();
+        let minted = vc_issuer
             .create_agent_identity_presentation_with_binding(&result.did, &result.identity_fields, wb, None, None)
-            .await
-        {
+            .await;
+        request_timing.vp_mint(vp_mint_started.elapsed());
+        match minted {
             Ok(final_vp_jwt) => {
                 // 1. inject into outbound body (replaces the slot if any existed)
                 if (state
@@ -7425,8 +7479,9 @@ async fn proxy_handler_with_mcp_runtime(
                     .timeout()
                     .map_or(30, |timeout| timeout.request_secs),
             );
-            tokio::time::timeout(deadline, execute)
-                .await
+            let executed = tokio::time::timeout(deadline, execute).await;
+            request_timing.mcp_proxy(request_latency_start.elapsed());
+            executed
                 .map_err(|_| create_error_response(StatusCode::GATEWAY_TIMEOUT, "MCP proxy execution timed out"))?
                 .map_err(|error| (*error).into_response())
         };
@@ -7564,6 +7619,7 @@ async fn proxy_handler_with_mcp_runtime(
     };
 
     // Wrap in circuit breaker if configured
+    let mut breaker_open = false;
     let send_response = async {
         let upstream_response = if let Some(cb) = circuit_breaker {
             match cb
@@ -7575,6 +7631,7 @@ async fn proxy_handler_with_mcp_runtime(
                     response
                 }
                 Err(crate::policies::CircuitBreakerError::Open { retry_after }) => {
+                    breaker_open = true;
                     error!(
                         channel = channel_name,
                         retry_after = ?retry_after,
@@ -7606,9 +7663,10 @@ async fn proxy_handler_with_mcp_runtime(
         };
         Ok::<_, Response>(upstream_response)
     };
+    let sent_upstream = owned_modern_response.is_none();
     let upstream_response = if let Some(response) = owned_modern_response {
         drop(send_response);
-        response
+        Ok(response)
     } else if modern_request.is_some() {
         let header_timeout = std::time::Duration::from_secs(
             state
@@ -7620,16 +7678,22 @@ async fn proxy_handler_with_mcp_runtime(
             .await
             .map_err(|_| {
                 create_error_response(StatusCode::GATEWAY_TIMEOUT, "Modern MCP upstream response headers timed out")
-            })??
+            })
+            .and_then(|sent| sent)
     } else if let Some(header_timeout) = a2a_stream_header_timeout {
         tokio::time::timeout(header_timeout, send_response)
             .await
             .map_err(|_| {
                 create_error_response(StatusCode::GATEWAY_TIMEOUT, "A2A upstream response headers timed out")
-            })??
+            })
+            .and_then(|sent| sent)
     } else {
-        send_response.await?
+        send_response.await
     };
+    if sent_upstream && !breaker_open {
+        request_timing.upstream(request_latency_start.elapsed());
+    }
+    let upstream_response = upstream_response?;
     // The vendor's answer to the Target's grant: a refusal of the token gets
     // one refresh and one retry, and its cookies and authentication challenges
     // never reach the caller.
@@ -14835,6 +14899,19 @@ async fn pinned_target_client(
     target_url: &str,
     facts: &crate::audit::request_events::RequestFacts<'_>,
 ) -> Result<reqwest::Client, Response> {
+    pinned_target_client_timed(state, channel_name, target_url, facts)
+        .await
+        .0
+}
+
+/// [`pinned_target_client`] with the wait for its blocking task and the time
+/// each of its steps took.
+async fn pinned_target_client_timed(
+    state: &ProxyState,
+    channel_name: &str,
+    target_url: &str,
+    facts: &crate::audit::request_events::RequestFacts<'_>,
+) -> (Result<reqwest::Client, Response>, crate::proxy::request_timing::PinStepTiming) {
     let candidate = target_url.to_string();
     let timeout = std::time::Duration::from_secs(
         state
@@ -14842,7 +14919,23 @@ async fn pinned_target_client(
             .a2a
             .timeout_seconds,
     );
-    match tokio::task::spawn_blocking(move || crate::egress::pinned_forward_client(&candidate, timeout)).await {
+    let submitted = std::time::Instant::now();
+    let task = tokio::task::spawn_blocking(move || {
+        let queued = submitted.elapsed();
+        let (result, steps) = crate::egress::pinned_forward_client_timed(&candidate, timeout);
+        (result, queued, steps)
+    })
+    .await;
+    let mut pin_timing = crate::proxy::request_timing::PinStepTiming {
+        total: submitted.elapsed(),
+        ..Default::default()
+    };
+    let task = task.map(|(result, queued, steps)| {
+        pin_timing.queued = Some(queued);
+        pin_timing.steps = steps;
+        result
+    });
+    let pinned = match task {
         Ok(Ok((client, _target))) => Ok(client),
         Ok(Err(e)) => {
             warn!(channel = channel_name, target = %loggable::url(target_url), "SSRF blocked by egress policy: {}", e);
@@ -14864,7 +14957,8 @@ async fn pinned_target_client(
             );
             Err(create_error_response(StatusCode::FORBIDDEN, "Request blocked by egress policy"))
         }
-    }
+    };
+    (pinned, pin_timing)
 }
 
 /// Caller headers forwarded on an agent-card fetch that carries the target
@@ -15028,6 +15122,7 @@ async fn evaluate_mcp_proxy_opa_policies(
     mcp_context: Option<&crate::surface_context::McpContext>,
     payment_context: Option<&crate::surface_context::PaymentContext>,
     trace_id: &str,
+    request_timing: &mut crate::proxy::request_timing::RequestTiming,
 ) -> Result<crate::surface_context::PolicyInput, Response> {
     /// Build a deny response for the MCP proxy OPA gate. For `tools/call`
     /// requests, returns a JSON-RPC error (HTTP 200); for everything else,
@@ -15106,19 +15201,25 @@ async fn evaluate_mcp_proxy_opa_policies(
                 .clone()
         {
             let client = crate::trust_registry_verification::TrqpListenerClient::new(manager);
-            policy_input.trust_check_results = crate::audit::context::with_caller(
-                authenticated_identity.map(crate::delegation_vault::audit::build_caller_context),
-                crate::trust_registry_verification::run_caller_trust_check(
-                    state
-                        .surface
-                        .surface_id
-                        .as_str(),
-                    caller_elements,
-                    &policy_input,
-                    &client,
+            let trust_check_started = std::time::Instant::now();
+            let (results, slowest_query) = crate::trust_registries::query_timing::collect(
+                request_timing.enabled(),
+                crate::audit::context::with_caller(
+                    authenticated_identity.map(crate::delegation_vault::audit::build_caller_context),
+                    crate::trust_registry_verification::run_caller_trust_check(
+                        state
+                            .surface
+                            .surface_id
+                            .as_str(),
+                        caller_elements,
+                        &policy_input,
+                        &client,
+                    ),
                 ),
             )
             .await;
+            policy_input.trust_check_results = results;
+            request_timing.trust_check(trust_check_started.elapsed(), caller_elements.len(), slowest_query);
         }
     }
 
@@ -22218,6 +22319,12 @@ allow if {
                 None,
                 None,
                 "trace-mcp-proxy",
+                &mut crate::proxy::request_timing::RequestTiming::new(
+                    false,
+                    std::time::Instant::now(),
+                    "surface-1",
+                    "mcp",
+                ),
             )
             .await
             .unwrap()

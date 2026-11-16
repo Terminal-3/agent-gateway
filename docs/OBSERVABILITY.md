@@ -207,6 +207,50 @@ The `xff` field keeps the client address that the reverse proxy reported. It is 
 many jurisdictions, so ship and retain the access log accordingly. [Log
 redaction](CONFIGURATION_REFERENCE.md#log-redaction) applies to these lines as well.
 
+## Request timing
+
+Every request to an MCP Access Point logs one `INFO` line, `MCP request timing`, when its handler
+finishes, whatever the outcome
+([`request_timing`](../src/proxy/request_timing.rs)). Durations are in milliseconds to a tenth,
+and a stage that did not run is left out.
+
+| Field | Meaning |
+| --- | --- |
+| `surface_id`, `channel` | The surface's id and name |
+| `mcp_method` | The JSON-RPC method, or `invalid` when it is longer than 64 characters or has characters outside letters, digits and `/ _ - . $` |
+| `target` | The Target's `host:port` |
+| `in_flight` | Proxy requests whose handler was running when this one started, on every surface, this one included |
+| `egress_client` | The client prepared for forwarding the request: `pinned` (built by the pin step) or `grant_route` (built for a Target grant). It is set before the policy gates and the circuit breaker, so a refused request can carry it without the Target being contacted. Both are built for the one request, so a send opens a new connection; left out when neither was prepared, as for `proxy://` MCP Proxies |
+| `total_ms` | The whole handler |
+| `body_read_ms` | Reading the request body from the caller |
+| `before_classify_ms` | From the start of the request until it is classified as MCP, `body_read_ms` included |
+| `pin_ms` | Waiting for the blocking task that resolves, vets and pins the Target and builds its client |
+| `pin_queue_ms` | From submitting that task until it starts on a blocking thread |
+| `pin_resolve_ms` | Resolving the Target's host with the OS resolver and vetting the addresses |
+| `pin_build_ms` | Building the pinned client, which loads the platform CA store |
+| `grant_client_ms` | Resolving, vetting and building the client of a Target grant's route, when the request carries a grant; recorded too when Strict egress refuses the build |
+| `identity_ms` | Caller identity resolution and identity VP verification before the Trust Check; when the request is refused there, up to the end of the request |
+| `trust_check_ms`, `trust_checks` | The caller-leg Trust Check and the number of checks in its list, on `proxy://` MCP Proxies as well |
+| `trust_check_connection_ms` | Of the slowest registry query: looking up the registry's connection, or waiting for it to be built or rebuilt |
+| `trust_check_preflight_ms` | Of the slowest registry query: the mediator status check before sending |
+| `trust_check_send_ms` | Of the slowest registry query: packing the query and forwarding it through the mediator |
+| `trust_check_reply_ms` | Of the slowest registry query: waiting for the registry's reply |
+| `vp_mint_ms` | Minting the request-path identity VP |
+| `mcp_proxy_ms` | Loading and running the request on a gateway-owned `proxy://` MCP Proxy, including its calls to the backend, until it answers, fails or times out |
+| `upstream_ms` | Sending to the Target until its response headers arrive, or until the send fails or times out; left out when the circuit breaker is open and nothing is sent |
+
+The checks of one Trust Check run concurrently, so the `trust_check_*` steps are those of the
+slowest query, by the sum of its steps; a query retried on a stale connection adds both attempts.
+They are left out when no query reached a registry.
+
+`pin_ms` minus the three `pin_*` steps is the time between the task finishing and the request
+handler running again. The line carries no headers, tokens, bodies, query strings or caller DIDs.
+
+The Trust Recorder logs `Trust Recorder timing` from its background task after each run, with
+`surface_id`, `entries`, `queue_ms` (from being spawned until it ran), `apply_ms` (writing the
+records) and `total_ms`. A run that finds no trust registry store applies nothing, and its line
+leaves out `entries` and `apply_ms`.
+
 ## Access token rotation events
 
 `POST /api/v1/access-tokens/{id}/rotate` emits structured tracing events on the `audit` target.

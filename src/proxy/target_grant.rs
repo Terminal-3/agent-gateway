@@ -50,6 +50,7 @@ pub(crate) struct TargetGrantRoute {
     provider: CredentialProvider,
     target_url: String,
     client: reqwest::Client,
+    client_build: std::time::Duration,
     mcp: bool,
 }
 
@@ -584,23 +585,29 @@ async fn route_unaudited(
             .a2a
             .timeout_seconds,
     );
-    let client = crate::egress::pinned_vendor_client(&target_url, timeout, allowlist)
-        .await
-        .map_err(|error| {
-            warn!(
-                target: "credential_delegation",
-                surface_id = %surface.surface_id,
-                error = ?error.to_string(),
-                "The Target of a request carrying a grant by binding was refused by Strict egress"
-            );
-            unavailable(surface, mcp, body, "forward_refused_by_strict_egress")
-        })?;
+    let client_build_started = std::time::Instant::now();
+    let client = crate::egress::pinned_vendor_client(&target_url, timeout, allowlist).await;
+    let client_build = client_build_started.elapsed();
+    let client = client.map_err(|error| {
+        warn!(
+            target: "credential_delegation",
+            surface_id = %surface.surface_id,
+            error = ?error.to_string(),
+            "The Target of a request carrying a grant by binding was refused by Strict egress"
+        );
+        let mut refused = unavailable(surface, mcp, body, "forward_refused_by_strict_egress");
+        refused
+            .extensions_mut()
+            .insert(GrantClientBuild(client_build));
+        refused
+    })?;
     Ok(Some(TargetGrantRoute {
         binding: binding.clone(),
         subject,
         provider,
         target_url,
         client,
+        client_build,
         mcp,
     }))
 }
@@ -695,11 +702,21 @@ pub(crate) struct Caller<'a> {
     pub facts: &'a crate::audit::request_events::RequestFacts<'a>,
 }
 
+/// The time spent resolving, vetting and building the client of a route
+/// whose build was refused, carried on the refusal's extensions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GrantClientBuild(pub(crate) std::time::Duration);
+
 impl TargetGrantRoute {
     /// The Strict client pinned to the provider's resource, which every
     /// request on this route is sent with.
     pub(crate) fn client(&self) -> &reqwest::Client {
         &self.client
+    }
+
+    /// Resolving, vetting and building [`Self::client`].
+    pub(crate) fn client_build(&self) -> std::time::Duration {
+        self.client_build
     }
 
     /// The URL every request on this route is sent to.

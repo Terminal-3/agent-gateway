@@ -1,0 +1,20 @@
+branch: gateway-timing-logs-agent-gateway-errol
+changes:
+  added:
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Log where each MCP request's time goes, and each Trust Recorder run's
+      description: >-
+        Every request to an MCP Access Point logs one `MCP request timing` line at `INFO` with
+        the total time and the time spent reading the request body, resolving and pinning the
+        Target (split into queueing, DNS and client build) or building a Target grant's client,
+        on caller identity, the Trust Check (with the connection, mediator check, send and reply
+        steps of its slowest registry query), the identity VP, a gateway-owned MCP Proxy and the
+        upstream call, with the number of requests in flight when it started, which egress
+        client forwarded it, the MCP method, the surface and the Target's host and port. The
+        Trust Recorder logs `Trust Recorder timing` after each run. Neither line carries
+        headers, tokens, bodies, query strings or caller DIDs.
+  changed: []
+  fixed: []
+  removed: []
+  security: []
+  breaking: []

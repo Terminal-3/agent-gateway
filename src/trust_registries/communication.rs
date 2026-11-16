@@ -28,6 +28,7 @@ use crate::comm::connection_health::ReconnectPolicy;
 use crate::comm::didcomm::trust_registry::PollResult;
 
 use super::did_manager::{DidMethod, generate_trust_registry_identity, load_trust_registry_secrets};
+use super::query_timing::{QueryStep, QueryTimer};
 use super::store::TrustRegistryStore;
 use super::types::{
     CreateReferenceFieldRequest, TrAdminListRecordsResponse, TrAdminRecordRequest, TrAdminRecordResponse,
@@ -2447,17 +2448,20 @@ impl TrustRegistryListenerManager {
         timeout: Duration,
     ) -> Result<serde_json::Value, TrustRegistryError> {
         let deadline = Instant::now() + timeout;
+        let mut timer = QueryTimer::new();
+        timer.begin(QueryStep::Connection);
         let connection = self
             .connection_for_did(trust_registry_did, deadline)
             .await?;
 
         match self
-            .send_and_await(&connection, message_type, body.clone(), deadline)
+            .send_and_await(&connection, message_type, body.clone(), deadline, &mut timer)
             .await
         {
             Err(TrustRegistryError::StaleConnection(reason)) => {
                 warn!("Stale connection to '{}': {}. Reconnecting (one attempt).", trust_registry_did, reason);
 
+                timer.begin(QueryStep::Connection);
                 let fresh = self
                     .rebuild_for_did(trust_registry_did, &connection, deadline)
                     .await?;
@@ -2469,7 +2473,7 @@ impl TrustRegistryListenerManager {
                         TrustRegistryError::Timeout("the rebuilt trust registry connection is not ready".to_string())
                     })?;
 
-                self.send_and_await(&fresh, message_type, body, deadline)
+                self.send_and_await(&fresh, message_type, body, deadline, &mut timer)
                     .await
             }
             other => other,
@@ -2490,6 +2494,7 @@ impl TrustRegistryListenerManager {
         message_type: &str,
         body: serde_json::Value,
         deadline: Instant,
+        timer: &mut QueryTimer,
     ) -> Result<serde_json::Value, TrustRegistryError> {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -2512,6 +2517,7 @@ impl TrustRegistryListenerManager {
         // status response is matched via the SDK `wanted_list`, which has
         // priority over the reader's `next` waiter, so this never steals a
         // query response from the reader.
+        timer.begin(QueryStep::Preflight);
         connection
             .client
             .preflight_check(QUERY_PREFLIGHT_TIMEOUT.min(remaining))
@@ -2520,6 +2526,7 @@ impl TrustRegistryListenerManager {
 
         // Register the waiter BEFORE forwarding so a fast response can't race
         // ahead of us and be dropped by the reader as unmatched.
+        timer.begin(QueryStep::Send);
         let rx = connection
             .register_waiter(thread_id.clone())
             .await;
@@ -2551,6 +2558,7 @@ impl TrustRegistryListenerManager {
             deadline.saturating_duration_since(Instant::now())
         );
 
+        timer.begin(QueryStep::Reply);
         match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(result)) => {
                 pending.answered = true;
