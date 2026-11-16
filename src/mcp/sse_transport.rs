@@ -779,9 +779,12 @@ fn is_filtered_header(key: &str) -> bool {
 // background reader task that routes responses by JSON-RPC `id`, and
 // exposes `send_request` for posting to the session endpoint.
 //
-// `UpstreamSseSessionManager` caches sessions by base_url.
+// `UpstreamSseSessionManager` caches sessions by base_url, and hands a
+// cached session only to a request vetted to every address its client is
+// pinned to.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, oneshot};
 use tracing::info;
@@ -798,11 +801,23 @@ struct UpstreamSseSessionInner {
     next_id: std::sync::atomic::AtomicU64,
     /// Set to `false` when the background SSE reader exits.
     alive: Arc<std::sync::atomic::AtomicBool>,
+    /// The background SSE reader, ended when the last handle is dropped so a
+    /// session replaced in the cache does not keep its connection open.
+    reader: tokio::task::AbortHandle,
+}
+
+impl Drop for UpstreamSseSessionInner {
+    fn drop(&mut self) {
+        self.reader
+            .abort();
+    }
 }
 
 /// Handle to a persistent upstream SSE session.
 pub struct UpstreamSseSession {
     inner: Arc<UpstreamSseSessionInner>,
+    /// The vetted addresses the session's client is pinned to.
+    pinned_addrs: Vec<SocketAddr>,
 }
 
 impl UpstreamSseSession {
@@ -878,7 +893,7 @@ impl UpstreamSseSession {
         let pending_clone = pending.clone();
         let alive_clone = alive.clone();
         let ch_name = channel_name.to_string();
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             while let Some(chunk_result) = byte_stream.next().await {
                 match chunk_result {
                     Ok(bytes) => {
@@ -936,7 +951,9 @@ impl UpstreamSseSession {
                 pending,
                 next_id: std::sync::atomic::AtomicU64::new(1),
                 alive,
+                reader: reader.abort_handle(),
             }),
+            pinned_addrs: Vec::new(),
         };
 
         // Auto-initialize: Legacy SSE servers require `initialize` →
@@ -984,6 +1001,22 @@ impl UpstreamSseSession {
         }
 
         Ok(session)
+    }
+
+    /// Whether the session may carry a request whose target was vetted to
+    /// `vetted_addrs`: every address its client is pinned to must be one of
+    /// them. A session pinned to no address carries nothing.
+    fn may_carry(
+        &self,
+        vetted_addrs: &[SocketAddr],
+    ) -> bool {
+        !self
+            .pinned_addrs
+            .is_empty()
+            && self
+                .pinned_addrs
+                .iter()
+                .all(|addr| vetted_addrs.contains(addr))
     }
 
     /// Returns `true` if the background SSE reader is still running.
@@ -1147,10 +1180,15 @@ impl UpstreamSseSessionManager {
     }
 
     /// Get or create a persistent session for the given base URL.
-    /// Evicts dead sessions automatically.
+    ///
+    /// `client` is pinned to `vetted_addrs`, the addresses this request's
+    /// target was vetted to. A cached session is reused only while it is alive
+    /// and pinned to addresses among them; otherwise a new session is opened
+    /// over `client` and replaces it.
     pub async fn get_or_connect(
         &self,
         client: &reqwest::Client,
+        vetted_addrs: &[SocketAddr],
         base_url: &str,
         channel_name: &str,
         max_event_bytes: usize,
@@ -1159,10 +1197,10 @@ impl UpstreamSseSessionManager {
         {
             let sessions = self.sessions.read().await;
             if let Some(session) = sessions.get(base_url) {
-                if session.is_alive() {
+                if session.is_alive() && session.may_carry(vetted_addrs) {
                     return Ok(session.clone());
                 }
-                info!(channel = channel_name, "UpstreamSseSession: cached session is dead, will reconnect");
+                info!(channel = channel_name, "UpstreamSseSession: cached session is not usable, will reconnect");
             }
         }
 
@@ -1172,14 +1210,14 @@ impl UpstreamSseSessionManager {
 
         // Double-check: another task may have connected while we waited for the lock
         if let Some(existing) = sessions.get(base_url) {
-            if existing.is_alive() {
+            if existing.is_alive() && existing.may_carry(vetted_addrs) {
                 return Ok(existing.clone());
             }
-            // Dead — remove before inserting new one
             sessions.remove(base_url);
         }
 
-        let session = UpstreamSseSession::connect(client, base_url, channel_name, max_event_bytes).await?;
+        let mut session = UpstreamSseSession::connect(client, base_url, channel_name, max_event_bytes).await?;
+        session.pinned_addrs = vetted_addrs.to_vec();
         let session = Arc::new(session);
         sessions.insert(base_url.to_string(), session.clone());
         Ok(session)
@@ -1195,16 +1233,18 @@ pub static UPSTREAM_SSE_SESSIONS: std::sync::LazyLock<UpstreamSseSessionManager>
 /// If the cached session dies mid-request (upstream closed the connection),
 /// evicts it and retries once with a fresh session. `max_event_bytes` caps one
 /// incomplete SSE event (`a2a.max_body_size`); a session shared by several
-/// callers keeps the cap it connected with.
+/// callers keeps the cap it connected with. `vetted_addrs` are the addresses
+/// `client` is pinned to; see [`UpstreamSseSessionManager::get_or_connect`].
 pub async fn send_via_persistent_sse(
     client: &reqwest::Client,
+    vetted_addrs: &[SocketAddr],
     base_url: &str,
     json_rpc_body: &[u8],
     channel_name: &str,
     max_event_bytes: usize,
 ) -> Result<String, String> {
     let session = UPSTREAM_SSE_SESSIONS
-        .get_or_connect(client, base_url, channel_name, max_event_bytes)
+        .get_or_connect(client, vetted_addrs, base_url, channel_name, max_event_bytes)
         .await?;
     match session
         .send_request(json_rpc_body)
@@ -1224,7 +1264,7 @@ pub async fn send_via_persistent_sse(
                 .await
                 .remove(base_url);
             let new_session = UPSTREAM_SSE_SESSIONS
-                .get_or_connect(client, base_url, channel_name, max_event_bytes)
+                .get_or_connect(client, vetted_addrs, base_url, channel_name, max_event_bytes)
                 .await?;
             new_session
                 .send_request(json_rpc_body)
@@ -1330,6 +1370,64 @@ mod tests {
         let (a, b) = tokio::join!(call("a"), call("b"));
         assert_eq!((&a["id"], &a["result"]["who"]), (&serde_json::json!(1), &serde_json::json!("a")), "{a}");
         assert_eq!((&b["id"], &b["result"]["who"]), (&serde_json::json!(1), &serde_json::json!("b")), "{b}");
+    }
+
+    /// A cached session is handed only to a request vetted to every address
+    /// its client is pinned to: a request vetting the same host to another
+    /// address opens a new session, which replaces the cached one.
+    #[tokio::test]
+    async fn a_cached_legacy_sse_session_is_reused_only_for_its_vetted_addresses() {
+        let target = crate::component_tests::helpers::LegacySseTarget::start().await;
+        let base_url = target.url.clone();
+        let first: SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let second: SocketAddr = "192.0.2.2:443".parse().unwrap();
+        let client = reqwest::Client::new();
+        let manager = UpstreamSseSessionManager::new();
+        let session = |vetted: &[SocketAddr]| {
+            let manager = &manager;
+            let client = &client;
+            let base_url = base_url.clone();
+            let vetted = vetted.to_vec();
+            async move {
+                manager
+                    .get_or_connect(client, &vetted, &base_url, "test", 1024 * 1024)
+                    .await
+                    .expect("the session connects")
+            }
+        };
+
+        let pinned_first = session(&[first]).await;
+        let again = session(&[first]).await;
+        assert!(Arc::ptr_eq(&pinned_first, &again), "the same vetted address reuses the session");
+
+        let pinned_second = session(&[second]).await;
+        assert!(!Arc::ptr_eq(&pinned_first, &pinned_second), "another vetted address reused the cached session");
+        assert_eq!(target.connections(), 2);
+
+        let among = session(&[first, second]).await;
+        assert!(Arc::ptr_eq(&pinned_second, &among), "a session pinned among the vetted addresses is reused");
+        assert_eq!(target.connections(), 2);
+
+        let reordered = session(&[second, first]).await;
+        assert!(Arc::ptr_eq(&among, &reordered), "the order of the vetted addresses changed the session");
+        assert_eq!(target.connections(), 2);
+
+        let pinned_both = UpstreamSseSessionManager::new();
+        let both = pinned_both
+            .get_or_connect(&client, &[first, second], &base_url, "test", 1024 * 1024)
+            .await
+            .unwrap();
+        let narrower = pinned_both
+            .get_or_connect(&client, &[first], &base_url, "test", 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&both, &narrower), "a session pinned outside the vetted set was reused");
+        assert_eq!(target.connections(), 4);
+
+        let unpinned = session(&[]).await;
+        let unpinned_again = session(&[]).await;
+        assert!(!Arc::ptr_eq(&unpinned, &unpinned_again), "a session pinned to no address was reused");
+        assert_eq!(target.connections(), 6);
     }
 
     /// Only a response answers a waiter: a server request or a string id that

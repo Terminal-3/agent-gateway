@@ -1,0 +1,32 @@
+branch: gateway-egress-gaps-agent-gateway-errol
+changes:
+  added: []
+  changed: []
+  fixed: []
+  removed: []
+  security:
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Send the Legacy SSE fallback only to the Target's vetted address
+      description: >-
+        When an MCP Target rejects a direct POST with 400, 404 or 405, the Legacy SSE retry
+        now uses the same pinned, redirect-disabled client as the forward. With no HTTP
+        proxy configured, it cannot reach an address the Target's host re-resolves to; a
+        configured proxy resolves the host itself. A cached Legacy SSE session is reused
+        only when every address it is pinned to was vetted for the request; otherwise a new
+        session replaces it. Fabric receive and MCP tool discovery, which share the session
+        cache, follow the same rule. With no vetted client the retry is refused with `403`
+        "Request blocked by egress policy".
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Vet the Target before delegating a payment for an Access Point request
+      description: >-
+        A delegated (`agent_pay`) payment is decided only after the Target passes egress
+        vetting, so no payment is delegated or settled for a request whose Target is then
+        refused. A blocked Target still answers `403` with the same refusal record.
+    - timestamp: '2026-11-12T00:00:00Z'
+      title: Fetch a served agent card without target auth from the vetted address
+      description: >-
+        The served agent card is fetched through a client pinned to the Target's vetted
+        address whether or not it carries `target.auth`. A Target that fails vetting,
+        whether its address is blocked or its host does not resolve, answers `403`
+        "Request blocked by egress policy" and is recorded as a refused request, as on the
+        forward. Without `target.auth`, a host that does not resolve answered `502` before.

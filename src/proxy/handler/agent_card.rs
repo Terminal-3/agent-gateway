@@ -638,53 +638,50 @@ impl TargetCardFetch<'_> {
         }
     }
 
-    /// The client the card is fetched with. A served card without a credential uses
-    /// the shared client; a served card with one uses a client pinned to the vetted
-    /// address and records an egress block. A preview always uses a pinned client
-    /// and records nothing.
+    /// The client the card is fetched with, always pinned to the vetted address. A
+    /// served card answers a vetting failure as the forward does: `403`, with an
+    /// egress block recorded as a refused request. A preview records nothing and
+    /// reports a host that does not resolve as unreachable (`502`).
     async fn client(
         &self,
         target_url: &str,
-        credential_sent: bool,
     ) -> Result<reqwest::Client, CardFailure> {
         let state = self.state;
         let channel_name = self.channel_name();
-        if !self.mode.serves() {
-            return unrecorded_pinned_client(state, target_url)
-                .await
-                .map_err(|e| match e {
-                    PinFailure::Egress(crate::egress::EgressError::Blocked(_)) => {
-                        warn!(channel = channel_name, target = %loggable::url(target_url), "Agent card preview blocked by egress policy");
-                        CardFailure::new(
-                            FetchFault::BlockedByEgress,
-                            create_error_response(StatusCode::FORBIDDEN, "Request blocked by egress policy"),
-                        )
-                    }
-                    e => {
-                        warn!(channel = channel_name, target = %loggable::url(target_url), error = %e, "Agent card preview could not reach the target");
-                        CardFailure::new(
-                            FetchFault::Unreachable,
-                            create_error_response(StatusCode::BAD_GATEWAY, "Failed to fetch from upstream"),
-                        )
-                    }
-                });
-        }
-        if !credential_sent {
-            return Ok(state.client.clone());
-        }
-        super::pinned_target_client(
-            state,
-            channel_name,
-            target_url,
-            &crate::audit::request_events::RequestFacts {
-                surface_id: &state.surface.surface_id,
+        if self.mode.serves() {
+            return super::pinned_target_client(
+                state,
                 channel_name,
-                trace_id: None,
-                via_fabric: false,
-            },
-        )
-        .await
-        .map_err(|response| self.fail(FetchFault::BlockedByEgress, response))
+                target_url,
+                &crate::audit::request_events::RequestFacts {
+                    surface_id: &state.surface.surface_id,
+                    channel_name,
+                    trace_id: None,
+                    via_fabric: false,
+                },
+            )
+            .await
+            .map(|(client, _)| client)
+            .map_err(|response| self.fail(FetchFault::BlockedByEgress, response));
+        }
+        unrecorded_pinned_client(state, target_url)
+            .await
+            .map_err(|e| match e {
+                PinFailure::Egress(crate::egress::EgressError::Blocked(_)) => {
+                    warn!(channel = channel_name, target = %loggable::url(target_url), "Agent card preview blocked by egress policy");
+                    CardFailure::new(
+                        FetchFault::BlockedByEgress,
+                        create_error_response(StatusCode::FORBIDDEN, "Request blocked by egress policy"),
+                    )
+                }
+                e => {
+                    warn!(channel = channel_name, target = %loggable::url(target_url), error = %e, "Agent card preview could not reach the target");
+                    CardFailure::new(
+                        FetchFault::Unreachable,
+                        create_error_response(StatusCode::BAD_GATEWAY, "Failed to fetch from upstream"),
+                    )
+                }
+            })
     }
 
     async fn fetch_over_http(
@@ -699,7 +696,7 @@ impl TargetCardFetch<'_> {
             .await?;
         let credential_sent = credential.is_some();
         let mut req = self
-            .client(target_url, credential_sent)
+            .client(target_url)
             .await?
             .get(target_url);
 
@@ -1006,6 +1003,51 @@ mod tests {
         assert_eq!(failure.fault, FetchFault::BlockedByEgress);
         assert_eq!(failure.response.status(), StatusCode::FORBIDDEN);
         assert!(events.is_empty(), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_served_card_without_a_credential_is_fetched_only_from_the_vetted_address() {
+        let card = json!({"name": "Orders agent", "url": "http://agent.internal/a2a", "skills": []});
+        let target = MockServer::start_with_response(card.to_string()).await;
+        let elsewhere = MockServer::start_with_response(json!({"name": "Elsewhere"}).to_string()).await;
+        let metrics = Arc::new(crate::metrics::MetricsStore::new(10));
+        let mut state = state(json!({"endpoint": target.url()}), &metrics).await;
+        // A shared client whose connections land somewhere other than the
+        // vetted address, as a re-resolved host would.
+        state.client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(elsewhere.url()).unwrap())
+            .build()
+            .unwrap();
+
+        let served = build(&state, CardMode::Serve)
+            .await
+            .unwrap();
+
+        assert_eq!(served.upstream, Some(card));
+        assert_eq!(
+            elsewhere
+                .request_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    /// A served card without a credential answers a Target that fails vetting
+    /// as the forward does, whether the address is blocked or the host does
+    /// not resolve: `403`, recorded as a refused request.
+    #[tokio::test]
+    async fn a_served_card_without_a_credential_is_refused_when_the_target_fails_vetting() {
+        for endpoint in ["http://169.254.169.254/agent", "http://no-such-host.invalid/agent"] {
+            let metrics = Arc::new(crate::metrics::MetricsStore::new(10));
+            let state = state(json!({"endpoint": endpoint}), &metrics).await;
+
+            let (failure, events) = crate::audit::producer::capture(build(&state, CardMode::Serve)).await;
+
+            let failure = failure.unwrap_err();
+            assert_eq!(failure.fault, FetchFault::BlockedByEgress, "{endpoint}");
+            assert_eq!(failure.response.status(), StatusCode::FORBIDDEN, "{endpoint}");
+            assert_eq!(events.len(), 1, "{endpoint}: {events:?}");
+        }
     }
 
     #[tokio::test]

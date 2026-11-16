@@ -3607,19 +3607,25 @@ async fn authorize_fabric_sender(
 /// redirects off, as on the direct path, so DNS cannot rebind it between
 /// vetting and connect. A cloud-metadata Target is refused. Other Targets
 /// (`proxy://`) keep the pooled client, which never follows redirects either.
+///
+/// The addresses are those the client is pinned to: `None` for the pooled
+/// client, which no Legacy SSE session may be opened or reused over.
 async fn forward_client_for(
     target_url: &str,
     timeout: std::time::Duration,
-) -> Result<reqwest::Client, ForwardClientError> {
+) -> Result<(reqwest::Client, Option<Vec<std::net::SocketAddr>>), ForwardClientError> {
     if !(target_url.starts_with("http://") || target_url.starts_with("https://")) {
-        return Ok(GLOBAL_HTTP_CLIENT
-            .get()
-            .cloned()
-            .unwrap_or_else(reqwest::Client::new));
+        return Ok((
+            GLOBAL_HTTP_CLIENT
+                .get()
+                .cloned()
+                .unwrap_or_else(reqwest::Client::new),
+            None,
+        ));
     }
     let candidate = target_url.to_string();
     match tokio::task::spawn_blocking(move || crate::egress::pinned_forward_client(&candidate, timeout)).await {
-        Ok(Ok((client, _target))) => Ok(client),
+        Ok(Ok((client, target))) => Ok((client, Some(target.addrs))),
         Ok(Err(error)) => Err(ForwardClientError::Blocked(error.to_string())),
         Err(error) => Err(ForwardClientError::VettingFailed(error.to_string())),
     }
@@ -3681,7 +3687,7 @@ async fn fetch_agent_card(
     config_id: &str,
 ) -> Option<serde_json::Value> {
     let client = match forward_client_for(card_url, timeout).await {
-        Ok(client) => client,
+        Ok((client, _)) => client,
         Err(error) => {
             channel_warn!(
                 config_id,
@@ -5696,8 +5702,8 @@ async fn process_forward_request_in_request_scope(
         .get()
         .copied()
         .unwrap_or(std::time::Duration::from_secs(30));
-    let client = match forward_client_for(&target_url, timeout).await {
-        Ok(client) => client,
+    let (client, vetted_addrs) = match forward_client_for(&target_url, timeout).await {
+        Ok(pinned) => pinned,
         Err(error) => {
             channel_warn!(
                 config_id,
@@ -6221,7 +6227,11 @@ async fn process_forward_request_in_request_scope(
     // MCP shortcut: if we already have a persistent SSE session to this upstream
     // (established during a previous request that got 400), use it directly
     // instead of trying a plain POST that we know will fail.
-    if surface_protocol == crate::config::ChannelProtocol::Mcp && modern_request.is_none() && !body_bytes.is_empty() {
+    if surface_protocol == crate::config::ChannelProtocol::Mcp
+        && modern_request.is_none()
+        && !body_bytes.is_empty()
+        && let Some(vetted_addrs) = vetted_addrs.as_deref()
+    {
         // Check if a persistent session already exists (cheap read lock check)
         let has_session = {
             let sessions = crate::mcp::sse_transport::UPSTREAM_SSE_SESSIONS
@@ -6237,6 +6247,7 @@ async fn process_forward_request_in_request_scope(
 
             match crate::mcp::sse_transport::send_via_persistent_sse(
                 &client,
+                vetted_addrs,
                 &target_url,
                 &body_bytes,
                 channel_id,
@@ -6344,6 +6355,7 @@ async fn process_forward_request_in_request_scope(
                 && modern_request.is_none()
                 && !body_bytes.is_empty()
                 && matches!(status, 400 | 404 | 405)
+                && let Some(vetted_addrs) = vetted_addrs.as_deref()
             {
                 channel_info!(
                     config_id,
@@ -6356,6 +6368,7 @@ async fn process_forward_request_in_request_scope(
 
                 match crate::mcp::sse_transport::send_via_persistent_sse(
                     &client,
+                    vetted_addrs,
                     &target_url,
                     &body_bytes,
                     channel_id,
@@ -11502,9 +11515,11 @@ mod tests {
         tokio::spawn(async move { axum::serve(listener, app).await });
 
         let target = format!("http://{address}/start");
-        let response = forward_client_for(&target, timeout)
+        let (client, vetted_addrs) = forward_client_for(&target, timeout)
             .await
-            .expect("a loopback Target is allowed")
+            .expect("a loopback Target is allowed");
+        assert_eq!(vetted_addrs, Some(vec![address]), "the client is pinned to the vetted address");
+        let response = client
             .get(&target)
             .send()
             .await
@@ -11870,6 +11885,102 @@ mod tests {
             );
         }
         assert_eq!(received[0]["x-peer-context"], "kept");
+    }
+
+    /// A Fabric receive forward to a Legacy SSE Target reuses a cached session
+    /// only when it is pinned to addresses the forward vetted for this request.
+    #[tokio::test]
+    async fn fabric_receive_reuses_a_legacy_sse_session_only_for_its_vetted_addresses() {
+        use crate::surfaces::AgentSurfaceStore;
+        // Surface lookup prefers the process-global surface store, which other
+        // tests in this binary can initialise; run in a child process where it
+        // is unset, so the lookup reads this test's storage root.
+        if std::env::var_os("ATG_FABRIC_SSE_SESSION_CHILD").is_none() {
+            let test_name = std::thread::current()
+                .name()
+                .unwrap()
+                .to_string();
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env("ATG_FABRIC_SSE_SESSION_CHILD", "1")
+                .env("RUST_MIN_STACK", "8388608")
+                .kill_on_drop(true)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated fabric Legacy SSE session check failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let target = crate::component_tests::helpers::LegacySseTarget::start().await;
+        let temp = tempfile::tempdir().unwrap();
+        let surfaces = crate::surfaces::FileSystemAgentSurfaceStore::new(
+            temp.path()
+                .join("agent_surfaces"),
+        )
+        .await
+        .unwrap();
+        let mut surface = crate::component_tests::helpers::build_minimal_channel();
+        surface.surface_id = "legacy-sse".to_string();
+        surface
+            .access_point
+            .protocol = crate::config::agent_surface::SurfaceProtocol::Mcp;
+        surface.target.endpoint = target.url.clone();
+        surfaces
+            .save(&surface)
+            .await
+            .unwrap();
+        let mut peer = crate::gateways::types::Gateway::new(
+            "Peer".to_string(),
+            String::new(),
+            "did:web:peer.example".to_string(),
+            crate::gateways::types::GatewayType::Remote,
+        );
+        peer.status = crate::gateways::types::GatewayStatus::Active;
+        peer.exposure_mode = Some(crate::gateways::types::ExposureMode::All);
+        peer.issuer_did = Some("did:web:peer-gateway.example".to_string());
+        let _issuer_dir =
+            crate::gateways::test_helpers::install_listener_manager_with_peers(temp.path(), &[peer]).await;
+        let forward = || async {
+            let mut message = make_forward_request_msg(temp.path(), Some("did:web:peer.example"), "legacy-sse");
+            message.message_body = serde_json::json!({
+                "channel_id": "legacy-sse", "method": "POST", "path": "/",
+                "headers": {"content-type": "application/json"},
+                "body": {"jsonrpc": "2.0", "method": "ping", "id": 1}
+            });
+            forward_response(&message).await
+        };
+
+        let response = forward().await;
+        assert_eq!(response["status"], 200, "{response}");
+        assert_eq!(target.connections(), 1, "the fallback opens one session");
+
+        let elsewhere: std::net::SocketAddr = "192.0.2.1:443"
+            .parse()
+            .unwrap();
+        let sessions = &crate::mcp::sse_transport::UPSTREAM_SSE_SESSIONS;
+        sessions
+            .sessions
+            .write()
+            .await
+            .remove(&target.url);
+        sessions
+            .get_or_connect(&reqwest::Client::new(), &[elsewhere], &target.url, "test", 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(target.connections(), 2);
+
+        let response = forward().await;
+        assert_eq!(response["status"], 200, "{response}");
+        assert_eq!(target.connections(), 3, "the forward reused a session pinned to an address it did not vet");
+
+        let response = forward().await;
+        assert_eq!(response["status"], 200, "{response}");
+        assert_eq!(target.connections(), 3, "the forward did not reuse the session pinned to its vetted address");
     }
 
     #[tokio::test]

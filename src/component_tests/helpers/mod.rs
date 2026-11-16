@@ -585,6 +585,100 @@ impl RecordingTarget {
     }
 }
 
+/// A Legacy SSE MCP target: `GET /sse` opens a session, a JSON-RPC request
+/// posted to the session's endpoint is answered on its stream with an empty
+/// result, and any other request is answered `405`.
+pub struct LegacySseTarget {
+    pub url: String,
+    pub address: SocketAddr,
+    connections: Arc<AtomicUsize>,
+    _server: tokio::task::JoinHandle<()>,
+}
+
+impl LegacySseTarget {
+    pub async fn start() -> Self {
+        use axum::extract::Query;
+        use axum::response::sse::{Event, Sse};
+        use futures::StreamExt;
+        use tokio::sync::mpsc;
+
+        type Streams = Arc<tokio::sync::Mutex<HashMap<usize, mpsc::Sender<Event>>>>;
+        let streams: Streams = Arc::default();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/sse",
+                axum::routing::get({
+                    let streams = streams.clone();
+                    let connections = connections.clone();
+                    move || {
+                        let streams = streams.clone();
+                        let session = connections.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            let (events, receiver) = mpsc::channel::<Event>(16);
+                            streams
+                                .lock()
+                                .await
+                                .insert(session, events);
+                            let endpoint = futures::stream::once(async move {
+                                Event::default()
+                                    .event("endpoint")
+                                    .data(format!("/messages?session={session}"))
+                            });
+                            Sse::new(
+                                endpoint
+                                    .chain(tokio_stream::wrappers::ReceiverStream::new(receiver))
+                                    .map(Ok::<_, std::convert::Infallible>),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/messages",
+                axum::routing::post(
+                    move |Query(query): Query<HashMap<String, usize>>,
+                          axum::Json(request): axum::Json<serde_json::Value>| {
+                        let streams = streams.clone();
+                        async move {
+                            if request.get("id").is_some() {
+                                let events = streams.lock().await[&query["session"]].clone();
+                                let answer = serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": {}});
+                                events
+                                    .send(Event::default().data(answer.to_string()))
+                                    .await
+                                    .unwrap();
+                            }
+                            axum::http::StatusCode::ACCEPTED
+                        }
+                    },
+                ),
+            )
+            .fallback(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .ok();
+        });
+        Self {
+            url: format!("http://{address}"),
+            address,
+            connections,
+            _server: server,
+        }
+    }
+
+    /// How many `GET /sse` sessions have been opened so far.
+    pub fn connections(&self) -> usize {
+        self.connections
+            .load(Ordering::SeqCst)
+    }
+}
+
 // ── gateway config builders ──────────────────────────────────────────────────
 
 /// Directory holding the TLS pair component tests boot the gateway with.
