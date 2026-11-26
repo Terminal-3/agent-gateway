@@ -1648,6 +1648,54 @@ mod tests {
         assert!(vc.is_object() || vc.is_array(), "VP should contain verifiableCredential");
     }
 
+    #[cfg(feature = "didwebvh")]
+    async fn mint_gateway_did(portable: bool) -> (String, String) {
+        use crate::identity::didwebvh::create::TEST_PORTABLE_DIDS;
+
+        crate::gateways::did_cache::init_shared_resolver()
+            .await
+            .unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let identity_store = Arc::new(MockIdentityStore::new()) as Arc<dyn IdentityStore>;
+        let vp_challenge_store = Arc::new(MockVpChallengeStore::new()) as Arc<dyn VpChallengeStore>;
+        let issuer = TEST_PORTABLE_DIDS
+            .scope(
+                portable,
+                VCIssuer::new(temp_dir.path(), "example.com", identity_store, vp_challenge_store, None, None),
+            )
+            .await
+            .unwrap();
+        let did = issuer
+            .get_issuer_did()
+            .await
+            .unwrap();
+        let log = crate::storage::did_artifacts::read_did_log_raw(temp_dir.path())
+            .await
+            .unwrap()
+            .expect("gateway did.jsonl must be written");
+        let birth = log
+            .lines()
+            .next()
+            .expect("gateway log must have a birth entry")
+            .to_string();
+        (did, birth)
+    }
+
+    #[cfg(feature = "didwebvh")]
+    #[tokio::test]
+    async fn gateway_did_is_portable_when_setting_on() {
+        let (did, birth) = mint_gateway_did(true).await;
+        assert!(did.starts_with("did:webvh:"), "gateway DID must be did:webvh, got: {did}");
+        crate::identity::didwebvh::create::assert_birth_entry_portable(&did, &birth, true).await;
+    }
+
+    #[cfg(feature = "didwebvh")]
+    #[tokio::test]
+    async fn gateway_did_is_not_portable_when_setting_off() {
+        let (did, birth) = mint_gateway_did(false).await;
+        crate::identity::didwebvh::create::assert_birth_entry_portable(&did, &birth, false).await;
+    }
+
     // === Baseline did:webvh Tests ===
     /// The proxy DID is created as did:webvh on the first boot and is
     /// stable on all subsequent boots.

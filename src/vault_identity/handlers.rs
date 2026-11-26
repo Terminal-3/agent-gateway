@@ -28,7 +28,7 @@ pub async fn generate_did_webvh_identity(
     purpose: Option<String>,
 ) -> anyhow::Result<(String, crate::identity::AgentIdentityRecord)> {
     use affinidi_tdk_common::secrets_resolver::secrets::SecretMaterial;
-    use didwebvh_rs::prelude::{CreateDIDConfig, Parameters, create_did};
+    use didwebvh_rs::prelude::{CreateDIDConfig, create_did};
 
     let issuer_did = vc_issuer
         .get_issuer_did()
@@ -112,10 +112,7 @@ pub async fn generate_did_webvh_identity(
     });
 
     // --- 5. Build Parameters with multibase update_keys ---
-    let parameters = Parameters {
-        update_keys: Some(std::sync::Arc::new(vec![didwebvh_rs::Multibase::new(multibase_pubkey.clone())])),
-        ..Default::default()
-    };
+    let parameters = crate::identity::didwebvh::create::birth_parameters(&multibase_pubkey);
 
     // --- 6. Call create_did() — library handles SCID, hash, signing ---
     let base_url = crate::identity::didwebvh::base_url_for_domain(&domain);
@@ -276,6 +273,47 @@ mod tests {
     }
 
     // === Vault Identity Tests ===
+    #[cfg(feature = "didwebvh")]
+    async fn mint_surface_did(portable: bool) -> (String, String) {
+        use crate::identity::didwebvh::create::TEST_PORTABLE_DIDS;
+
+        let dir = tempfile::tempdir().unwrap();
+        let issuer = make_issuer(dir.path()).await;
+        let (did, record) = TEST_PORTABLE_DIDS
+            .scope(portable, super::generate_did_webvh_identity(&issuer, "surface", None))
+            .await
+            .unwrap();
+        let id_path = dir
+            .path()
+            .join("identity")
+            .join(&record.identity_hash);
+        let log = crate::storage::did_artifacts::read_did_log_raw(&id_path)
+            .await
+            .unwrap()
+            .expect("surface did.jsonl must be written");
+        let birth = log
+            .lines()
+            .next()
+            .expect("surface log must have a birth entry")
+            .to_string();
+        (did, birth)
+    }
+
+    #[cfg(feature = "didwebvh")]
+    #[tokio::test]
+    async fn surface_did_is_portable_when_setting_on() {
+        let (did, birth) = mint_surface_did(true).await;
+        assert!(did.contains(":surface:"), "surface DID must contain ':surface:', got: {did}");
+        crate::identity::didwebvh::create::assert_birth_entry_portable(&did, &birth, true).await;
+    }
+
+    #[cfg(feature = "didwebvh")]
+    #[tokio::test]
+    async fn surface_did_is_not_portable_when_setting_off() {
+        let (did, birth) = mint_surface_did(false).await;
+        crate::identity::didwebvh::create::assert_birth_entry_portable(&did, &birth, false).await;
+    }
+
     /// cert path segment must produce a DID containing ':cert:'.
     #[cfg(feature = "didwebvh")]
     #[tokio::test]

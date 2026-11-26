@@ -191,7 +191,7 @@ Network topology and the surfaces served. The largest configuration file; the ex
 | `channels` | Route prefixes. The legacy wire name for surface routes. The dashboard offers them as an Access Point's **Surface Prefix**, in this order, and preselects the first for a new surface. |
 | `routes` | Route categories and their types, prefixes, and fallbacks |
 | `mcp_proxies` | Route prefixes for MCP proxy endpoints |
-| `did` | The domain used when generating `did:web` and `did:webvh` identifiers |
+| `did` | `domain`: the domain used when generating `did:web` and `did:webvh` identifiers. `portable` (default `false`): mint every `did:webvh` DID (the gateway's own, surfaces', managed identities', issuers', connection points' and trust registries') with `portable: true` in its first log entry, so it can later move to another host and keep its identity. A DID's first entry is immutable, so the setting affects only DIDs minted after it is set; existing DIDs keep the value they were born with. Read once, at startup. |
 | `webauthn` | Relying-party ID and external origin for passkey registration |
 | `integration` | Notification and webhook integration settings |
 | `sts` | Security Token Service runtime settings. See [`STS.md`](STS.md). |
