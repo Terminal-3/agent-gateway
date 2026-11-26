@@ -140,6 +140,13 @@ where
 pub struct DidConfig {
     /// Domain used for did:web generation
     pub domain: String,
+
+    /// Mint every did:webvh DID with `portable: true` in its first log entry, so it can later
+    /// move to another host and keep its identity. The first entry is immutable, so this
+    /// affects only DIDs minted after it is set; existing DIDs keep the value they were born
+    /// with. Read once, at startup.
+    #[serde(default)]
+    pub portable: bool,
 }
 
 /// WebAuthn configuration

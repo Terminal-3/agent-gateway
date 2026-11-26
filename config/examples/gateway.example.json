@@ -2,7 +2,8 @@
   "terms": false,
   "affinidi_terms_url": "https://well.affinidi.io/terms/v1/current.json",
   "did": {
-    "domain": "YOUR_DOMAIN"
+    "domain": "YOUR_DOMAIN",
+    "portable": false
   },
   "oob_connection": {
     "pending_expiry_hours": 24

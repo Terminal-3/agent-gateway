@@ -4,6 +4,43 @@ use didwebvh_rs::prelude::{CreateDIDConfig, Parameters, create_did};
 
 use super::types::LogEntry;
 
+static PORTABLE_DIDS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+tokio::task_local! {
+    /// The value [`portable_dids`] returns inside a test's scope, instead of the process-global
+    /// one, which is set once per process.
+    pub(crate) static TEST_PORTABLE_DIDS: bool;
+}
+
+/// Install `did.portable` from `gateway.json`. Called once at startup, before any DID is
+/// minted; a second call is a no-op.
+pub fn init_portable_dids(portable: bool) {
+    let _ = PORTABLE_DIDS.set(portable);
+}
+
+/// Whether the gateway mints its did:webvh DIDs portable; `false` before initialisation.
+pub(crate) fn portable_dids() -> bool {
+    #[cfg(test)]
+    if let Ok(portable) = TEST_PORTABLE_DIDS.try_with(|portable| *portable) {
+        return portable;
+    }
+    PORTABLE_DIDS
+        .get()
+        .copied()
+        .unwrap_or(false)
+}
+
+/// Parameters of a did:webvh birth entry controlled by `multibase_pubkey`. `portable` is
+/// written only when [`portable_dids`] is on, so a non-portable birth entry omits it.
+pub(crate) fn birth_parameters(multibase_pubkey: &str) -> Parameters {
+    Parameters {
+        update_keys: Some(std::sync::Arc::new(vec![didwebvh_rs::Multibase::new(multibase_pubkey.to_string())])),
+        portable: portable_dids().then_some(true),
+        ..Default::default()
+    }
+}
+
 pub struct WebVhCreateResult {
     pub final_did: String,
     pub scid: String,
@@ -46,10 +83,7 @@ pub(crate) async fn create_webvh_did(
         .map_err(|e| anyhow::anyhow!("Failed to build auth secret: {}", e))?;
     auth_secret.id = did_key_id;
 
-    let parameters = Parameters {
-        update_keys: Some(std::sync::Arc::new(vec![didwebvh_rs::Multibase::new(multibase_pubkey.clone())])),
-        ..Default::default()
-    };
+    let parameters = birth_parameters(&multibase_pubkey);
 
     let normalized_base = format!("{}/", base_url.trim_end_matches('/'));
     let create_result = create_did(
@@ -85,9 +119,88 @@ pub(crate) async fn create_webvh_did(
     })
 }
 
+/// Asserts that the birth entry `raw_birth_entry` of `did` writes `portable: true` exactly when
+/// `expected` is set, and that the didwebvh-rs resolver accepts it and reports the same.
+#[cfg(test)]
+pub(crate) async fn assert_birth_entry_portable(
+    did: &str,
+    raw_birth_entry: &str,
+    expected: bool,
+) {
+    let entry: serde_json::Value = serde_json::from_str(raw_birth_entry).expect("birth entry must be JSON");
+    let written = entry
+        .pointer("/parameters/portable")
+        .cloned();
+    if expected {
+        assert_eq!(written, Some(serde_json::Value::Bool(true)), "birth entry must set portable: {entry}");
+    } else {
+        assert!(
+            written.is_none() || written == Some(serde_json::Value::Bool(false)),
+            "birth entry must leave portable unset or false: {entry}"
+        );
+    }
+
+    let mut state = didwebvh_rs::DIDWebVHState::default();
+    let (_, metadata) = state
+        .resolve_log(did, raw_birth_entry, None)
+        .await
+        .expect("didwebvh-rs must accept the birth entry");
+    assert_eq!(metadata.portable, expected);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn create_test_did() -> WebVhCreateResult {
+        let key_pair = super::super::generate_ed25519_keypair().expect("ed25519 keypair must be created");
+        let placeholder_did = "did:webvh:{SCID}:example.com:agents:portable";
+        let did_document = serde_json::json!({
+            "id": placeholder_did,
+            "@context": ["https://www.w3.org/ns/did/v1"],
+            "verificationMethod": [{
+                "id": format!("{}#key-1", placeholder_did),
+                "type": "JsonWebKey2020",
+                "controller": placeholder_did,
+                "publicKeyJwk": strip_jwk_private_key(&key_pair.public_key)
+            }],
+            "authentication": [format!("{}#key-1", placeholder_did)]
+        });
+        create_webvh_did(&key_pair.private_key, did_document, "https://example.com/")
+            .await
+            .expect("did:webvh creation must succeed")
+    }
+
+    #[tokio::test]
+    async fn create_webvh_did_is_portable_when_setting_on() {
+        let created = TEST_PORTABLE_DIDS
+            .scope(true, create_test_did())
+            .await;
+        assert_birth_entry_portable(&created.final_did, &created.log_entry_json, true).await;
+        assert!(created.signed_entry.parameters.portable);
+    }
+
+    #[tokio::test]
+    async fn create_webvh_did_is_not_portable_when_setting_off() {
+        let created = TEST_PORTABLE_DIDS
+            .scope(false, create_test_did())
+            .await;
+        assert_birth_entry_portable(&created.final_did, &created.log_entry_json, false).await;
+    }
+
+    #[tokio::test]
+    async fn create_webvh_did_is_not_portable_when_setting_unset() {
+        let created = create_test_did().await;
+        assert_birth_entry_portable(&created.final_did, &created.log_entry_json, false).await;
+    }
+
+    #[test]
+    fn birth_parameters_set_portable_only_when_setting_on() {
+        let on = TEST_PORTABLE_DIDS.sync_scope(true, || birth_parameters("z6MkTest"));
+        let off = TEST_PORTABLE_DIDS.sync_scope(false, || birth_parameters("z6MkTest"));
+        assert_eq!(on.portable, Some(true));
+        assert_eq!(off.portable, None);
+    }
 
     #[test]
     fn strip_jwk_private_key_removes_d() {

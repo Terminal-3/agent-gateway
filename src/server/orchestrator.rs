@@ -752,6 +752,9 @@ pub async fn run_axum_proxy(
         None
     };
 
+    #[cfg(feature = "didwebvh")]
+    crate::identity::didwebvh::create::init_portable_dids(network_config.did.portable);
+
     // Initialize VC issuer early (needed for identity_selector and identity API)
     // Always created now that identity API features are always enabled
     info!("Initializing VC issuer for agent identity management");

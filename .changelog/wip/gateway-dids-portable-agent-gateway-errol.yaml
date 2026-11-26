@@ -1,0 +1,16 @@
+branch: gateway-dids-portable-agent-gateway-errol
+changes:
+  added:
+    - timestamp: '2026-11-26T12:00:00Z'
+      title: Add did.portable to mint did:webvh DIDs that can move to another host
+      description: >-
+        Setting `did.portable` to `true` in `gateway.json` mints every new did:webvh DID (the
+        gateway's own, surfaces', managed identities', issuers', connection points' and trust
+        registries') with `portable: true` in its first log entry, which did:webvh allows only
+        at creation, so the DID can later move to another host and keep its identity. It
+        defaults to `false`, and existing DIDs keep the value they were born with.
+  changed: []
+  fixed: []
+  removed: []
+  security: []
+  breaking: []
